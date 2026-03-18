@@ -8,7 +8,17 @@ Claude Max has rolling usage limits (5-hour window + 7-day ceiling). With multip
 
 ## How it works
 
-Stores named copies of `~/.claude/.credentials.json` and swaps them on demand. A systemd timer polls the OAuth usage API in the background, and a wrapper around `claude` auto-switches accounts when limits are hit.
+1. **Stores** named copies of `~/.claude/.credentials.json`
+2. **Monitors** usage via OAuth API (systemd timer, every 5 min)
+3. **Detects** when you're approaching limits (Stop hook checks usage cache)
+4. **Swaps** credentials on disk and auto-resumes your session with the new account
+
+```
+claude running → Stop hook → usage at 92% → swap to "work" → claude stops
+  wrapper → claude --resume <session-id> "Go continue." → resumes with new account
+```
+
+Sessions are tracked per-account, so you can see which account each session used.
 
 ## Install
 
@@ -18,7 +28,7 @@ cd claude-revolver
 ./install.sh
 ```
 
-Installs to `~/.local/bin/`. Optionally sets up a systemd timer and a Claude Code hook.
+Installs to `~/.local/bin/`. Sets up hooks and systemd timer.
 
 ### Dependencies
 
@@ -43,7 +53,7 @@ claude-revolver
 # Or switch directly
 claude-revolver switch work
 
-# Launch claude with auto-swap on rate limit
+# Launch claude with auto-swap + auto-resume
 claude-revolver wrap
 ```
 
@@ -55,7 +65,53 @@ Add to `.zshrc` / `.bashrc`:
 alias claude='claude-revolver wrap --'
 ```
 
-Every `claude` invocation goes through the wrapper — pre-checks usage, auto-swaps on rate limit exit.
+When usage hits the threshold, the Stop hook swaps credentials and the wrapper auto-resumes — seamless continuation across accounts.
+
+### Without the wrapper
+
+Even without the wrapper, the Stop hook still swaps credentials on disk. Claude prints `Resume with: claude --resume <id>` as usual — just run it and the new account is active.
+
+## Configuration
+
+`~/.config/claude-revolver/config.json`:
+
+```json
+{
+  "poll_interval_seconds": 300,
+  "thresholds": {
+    "five_hour": 90,
+    "seven_day": 95
+  },
+  "strategy": {
+    "type": "drain",
+    "order": ["personal", "work", "client"]
+  },
+  "auto_resume": true,
+  "auto_message": "Go continue.",
+  "notify": true
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `poll_interval_seconds` | 300 | Usage API poll frequency |
+| `thresholds.five_hour` | 90 | 5h utilization % trigger (0–100) |
+| `thresholds.seven_day` | 95 | 7d utilization % trigger (0–100) |
+| `strategy.type` | `drain` | `drain`, `balanced`, or `manual` |
+| `strategy.order` | `[]` | Priority list for `drain` (empty = auto by 7d desc) |
+| `auto_resume` | true | Auto-resume session after swap |
+| `auto_message` | `Go continue.` | Prompt sent on auto-resume |
+| `notify` | true | Desktop notifications |
+
+### Strategies
+
+- **`drain`** — Use one account until its 7d is maxed, then the next. Set `order` to control priority, or leave empty to auto-drain highest-7d first.
+- **`balanced`** — Spread load. Always pick the account with lowest 7d utilization.
+- **`manual`** — No auto-swap. Only switch with `claude-revolver switch`.
+
+### 5h temp-swap
+
+If the active account hits the 5h limit but still has 7d budget, the system temporarily switches and **swaps back** when the 5h window resets. This avoids wasting 7d capacity on a short-term bottleneck.
 
 ## Commands
 
@@ -68,37 +124,22 @@ Every `claude` invocation goes through the wrapper — pre-checks usage, auto-sw
 | `remove`, `rm <name>` | Remove an account |
 | `status [name]` | Show account info with live usage query |
 | `sync` | Save live credentials back to store |
-| `wrap [-- args...]` | Launch claude with auto-swap |
-| `install-hook` | Add rate-limit detection hook to Claude Code |
+| `sessions` | Show session → account mapping |
+| `wrap [-- args...]` | Launch claude with auto-swap + auto-resume |
+| `config show` | Show current config |
+| `config set <key> <val>` | Update a config value |
+| `install-hook` | Install all hooks (Stop, SessionStart, PostToolUseFailure) |
 | `install-systemd` | Install background usage monitor timer |
-| `uninstall-hook` | Remove the hook |
+| `uninstall-hook` | Remove hooks |
 | `uninstall-systemd` | Remove systemd units |
-
-## Optional setup
-
-### Background usage monitoring
-
-```bash
-claude-revolver install-systemd
-```
-
-Polls the OAuth usage API every 15 minutes for all accounts. Sends desktop notifications when approaching limits. Writes `usage-cache.json` used by `list` and `wrap`.
-
-### Rate limit detection hook
-
-```bash
-claude-revolver install-hook
-```
-
-Adds a `PostToolUseFailure` hook to `~/.claude/settings.json` that detects rate limit errors mid-session and writes a flag file. The `wrap` command picks this up on exit and offers to switch accounts.
 
 ## Limitations
 
-- **CLI terminal only** — Claude Desktop and remote sessions use OAuth exclusively with no hook/wrapper mechanism
-- **Requires manual login** — each account must be logged in via `claude login` before adding (OAuth requires browser)
-- **Restart needed** — switching credentials requires restarting Claude Code
+- **CLI terminal only** — Claude Desktop / remote / web use OAuth with no hook mechanism
+- **Requires manual login** — each account must be logged in via `claude login` first
+- **Session restart** — credentials are cached in memory; swapping requires stop + resume
 
 ## Docs
 
-- [Architecture](docs/architecture.md) — system diagram, data layout, components
-- [Internals](docs/internals.md) — credential sync, account selection, edge cases, security
+- [Architecture](docs/architecture.md) — system diagram, hook flow, data layout, components
+- [Internals](docs/internals.md) — credential sync, selection algorithm, config, edge cases

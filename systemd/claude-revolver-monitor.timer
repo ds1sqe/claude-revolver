@@ -1,10 +1,10 @@
 [Unit]
-Description=Poll Claude account usage every 15 minutes
+Description=Poll Claude account usage periodically
 Documentation=https://github.com/ds1sqe/claude-revolver
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=15min
+OnUnitActiveSec=5min
 Persistent=true
 
 [Install]
