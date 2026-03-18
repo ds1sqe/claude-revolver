@@ -24,7 +24,7 @@ fn add_stores_credentials() {
 }
 
 #[test]
-fn add_second_preserves_active() {
+fn add_second_sets_active() {
     let env = TestEnv::new();
     env.write_live_credentials(&helpers::fake_credentials("personal"));
     env.cmd().args(["add", "personal"]).assert().success();
@@ -33,13 +33,27 @@ fn add_second_preserves_active() {
     env.write_live_credentials(&helpers::fake_credentials("work"));
     env.cmd().args(["add", "work"]).assert().success();
 
-    // Active stays on first account
-    assert_eq!(env.read_active(), "personal");
+    // Active moves to newest added account (live creds belong to it)
+    assert_eq!(env.read_active(), "work");
     // Both stored correctly
     assert_eq!(
         env.read_stored_creds("work")["claudeAiOauth"]["accessToken"],
         "sk-ant-oat01-fake-work"
     );
+}
+
+#[test]
+fn add_duplicate_token_fails() {
+    let env = TestEnv::new();
+    env.write_live_credentials(&helpers::fake_credentials("personal"));
+    env.cmd().args(["add", "personal"]).assert().success();
+
+    // Try adding a different name but with the same live token (user forgot to re-login)
+    env.cmd()
+        .args(["add", "work"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("same as account 'personal'"));
 }
 
 #[test]

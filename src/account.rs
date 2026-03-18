@@ -147,12 +147,20 @@ pub fn add_account(name: &str) -> Result<()> {
     }
 
     let creds = read_live_credentials()?;
+
+    // Reject if live token already belongs to another stored account
+    for existing in list_accounts()? {
+        if let Ok(stored) = read_credentials(&existing) {
+            if stored.claude_ai_oauth.access_token == creds.claude_ai_oauth.access_token {
+                return Err(RevolverError::DuplicateToken(existing).into());
+            }
+        }
+    }
+
     save_credentials(name, &creds)?;
 
-    // Set as active if first account
-    if get_active()?.is_none() {
-        set_active(name)?;
-    }
+    // Live credentials belong to this account
+    set_active(name)?;
 
     Ok(())
 }

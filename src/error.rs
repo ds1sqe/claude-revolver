@@ -26,4 +26,7 @@ pub enum RevolverError {
 
     #[error("token expired for account '{0}'")]
     TokenExpired(String),
+
+    #[error("live token is the same as account '{0}' — login to a different account first")]
+    DuplicateToken(String),
 }
