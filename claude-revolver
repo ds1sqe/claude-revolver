@@ -1,0 +1,654 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# claude-revolver — Multi-account OAuth credential manager for Claude Code CLI
+# https://github.com/ds1sqe/claude-revolver
+
+readonly VERSION="1.0.0"
+readonly DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/claude-revolver"
+readonly CLAUDE_DIR="$HOME/.claude"
+readonly CRED_FILE="$CLAUDE_DIR/.credentials.json"
+readonly ACTIVE_FILE="$DATA_DIR/active"
+readonly USAGE_CACHE="$DATA_DIR/usage-cache.json"
+readonly RATE_LIMITED_FLAG="$DATA_DIR/rate-limited"
+readonly USAGE_API="https://api.anthropic.com/api/oauth/usage"
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
+info() { printf '\033[36m::\033[0m %s\n' "$*"; }
+
+ensure_data_dir() {
+    if [[ ! -d "$DATA_DIR" ]]; then
+        mkdir -p "$DATA_DIR"
+        chmod 700 "$DATA_DIR"
+    fi
+}
+
+check_deps() {
+    local missing=()
+    command -v jq   &>/dev/null || missing+=(jq)
+    command -v curl &>/dev/null || missing+=(curl)
+    if ((${#missing[@]})); then
+        die "missing dependencies: ${missing[*]}"
+    fi
+}
+
+validate_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        die "invalid account name '$name' — use alphanumeric, hyphens, underscores"
+    fi
+}
+
+get_active() {
+    [[ -f "$ACTIVE_FILE" ]] && cat "$ACTIVE_FILE" || echo ""
+}
+
+# Read a field from an account's credentials
+read_cred_field() {
+    local acct="$1" field="$2"
+    local cred="$DATA_DIR/$acct/credentials.json"
+    [[ -f "$cred" ]] && jq -r ".claudeAiOauth.$field // empty" "$cred" 2>/dev/null || echo ""
+}
+
+# Get token from an account's stored credentials
+get_token() {
+    local acct="$1"
+    read_cred_field "$acct" "accessToken"
+}
+
+# Fetch live usage for a token, output JSON
+fetch_usage() {
+    local token="$1"
+    curl -sf --max-time 10 "$USAGE_API" \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null
+}
+
+# Read cached usage for an account
+cached_usage() {
+    local acct="$1"
+    [[ -f "$USAGE_CACHE" ]] && jq -r ".[\"$acct\"] // empty" "$USAGE_CACHE" 2>/dev/null || echo ""
+}
+
+# Atomic write: write to tmp then mv
+atomic_write() {
+    local dest="$1" content="$2"
+    local tmp="${dest}.tmp.$$"
+    printf '%s' "$content" > "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$dest"
+}
+
+# List account directory names
+list_accounts() {
+    local accounts=()
+    for dir in "$DATA_DIR"/*/; do
+        [[ -d "$dir" && -f "$dir/credentials.json" ]] || continue
+        accounts+=("$(basename "$dir")")
+    done
+    printf '%s\n' "${accounts[@]}"
+}
+
+# Count accounts
+count_accounts() {
+    local c=0
+    for dir in "$DATA_DIR"/*/; do
+        [[ -d "$dir" && -f "$dir/credentials.json" ]] && ((c++))
+    done
+    echo "$c"
+}
+
+# Pick best account to swap to (lowest seven_day utilization)
+pick_best_account() {
+    local exclude="${1:-}"
+    [[ ! -f "$USAGE_CACHE" ]] && return 1
+
+    local acct
+    while IFS= read -r acct; do
+        [[ -z "$acct" || "$acct" == "$exclude" ]] && continue
+        [[ -f "$DATA_DIR/$acct/credentials.json" ]] || continue
+        echo "$acct"
+    done < <(
+        jq -r '
+            to_entries
+            | map(select(.value.token_expired != true))
+            | sort_by(.value.seven_day.utilization // 999, .value.five_hour.utilization // 999)
+            | .[].key
+        ' "$USAGE_CACHE" 2>/dev/null
+    ) | head -1
+}
+
+# Format utilization with color
+fmt_util() {
+    local val="$1" label="$2"
+    if [[ -z "$val" || "$val" == "null" ]]; then
+        printf '%s:--%%' "$label"
+        return
+    fi
+    local int_val="${val%%.*}"
+    if ((int_val >= 90)); then
+        printf '\033[31m%s:%s%%\033[0m' "$label" "$val"
+    elif ((int_val >= 70)); then
+        printf '\033[33m%s:%s%%\033[0m' "$label" "$val"
+    else
+        printf '\033[32m%s:%s%%\033[0m' "$label" "$val"
+    fi
+}
+
+# Sync live credentials back to active account store
+sync_back() {
+    local active
+    active=$(get_active)
+    [[ -z "$active" ]] && return 0
+    [[ -f "$CRED_FILE" ]] || return 0
+    [[ -d "$DATA_DIR/$active" ]] || return 0
+
+    if [[ "$CRED_FILE" -nt "$DATA_DIR/$active/credentials.json" ]]; then
+        cp "$CRED_FILE" "$DATA_DIR/$active/credentials.json"
+        chmod 600 "$DATA_DIR/$active/credentials.json"
+    fi
+}
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+cmd_add() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "usage: claude-revolver add <name>"
+    validate_name "$name"
+    check_deps
+    ensure_data_dir
+
+    [[ -f "$CRED_FILE" ]] || die "no credentials at $CRED_FILE — run 'claude login' first"
+
+    local acct_dir="$DATA_DIR/$name"
+    if [[ -d "$acct_dir" && -f "$acct_dir/credentials.json" ]]; then
+        die "account '$name' already exists — remove it first or pick another name"
+    fi
+
+    mkdir -p "$acct_dir"
+    cp "$CRED_FILE" "$acct_dir/credentials.json"
+    chmod 600 "$acct_dir/credentials.json"
+
+    # Set as active if first account
+    if [[ -z "$(get_active)" ]]; then
+        echo "$name" > "$ACTIVE_FILE"
+    fi
+
+    local sub_type
+    sub_type=$(jq -r '.claudeAiOauth.subscriptionType // "unknown"' "$acct_dir/credentials.json")
+    info "saved current credentials as '$name' ($sub_type)"
+}
+
+cmd_remove() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "usage: claude-revolver remove <name>"
+    ensure_data_dir
+
+    local acct_dir="$DATA_DIR/$name"
+    [[ -d "$acct_dir" ]] || die "account '$name' not found"
+
+    local active
+    active=$(get_active)
+    if [[ "$name" == "$active" ]]; then
+        warn "removing active account '$name'"
+        : > "$ACTIVE_FILE"
+    fi
+
+    rm -rf "$acct_dir"
+    info "removed '$name'"
+}
+
+cmd_list() {
+    check_deps
+    ensure_data_dir
+
+    local active
+    active=$(get_active)
+    local found=0
+
+    printf '  %-2s %-16s %-8s %-12s %-12s\n' "" "NAME" "TYPE" "5h" "7d"
+    printf '  %s\n' "  ────────────────────────────────────────────────"
+
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        found=1
+        local marker=" "
+        [[ "$name" == "$active" ]] && marker="*"
+
+        local sub_type
+        sub_type=$(read_cred_field "$name" "subscriptionType")
+        [[ -z "$sub_type" ]] && sub_type="?"
+
+        local u5="" u7=""
+        local cached
+        cached=$(cached_usage "$name")
+        if [[ -n "$cached" ]]; then
+            u5=$(echo "$cached" | jq -r '.five_hour.utilization // empty' 2>/dev/null)
+            u7=$(echo "$cached" | jq -r '.seven_day.utilization // empty' 2>/dev/null)
+        fi
+
+        printf '  %s ' "$marker"
+        printf '%-16s ' "$name"
+        printf '%-8s ' "$sub_type"
+        fmt_util "${u5:-}" "5h"
+        printf '   '
+        fmt_util "${u7:-}" "7d"
+        printf '\n'
+    done < <(list_accounts)
+
+    if ((found == 0)); then
+        echo "  no accounts — use 'claude-revolver add <name>' to save current credentials"
+    fi
+}
+
+cmd_switch() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "usage: claude-revolver switch <name>"
+    check_deps
+    ensure_data_dir
+
+    local acct_dir="$DATA_DIR/$name"
+    [[ -f "$acct_dir/credentials.json" ]] || die "account '$name' not found"
+
+    local current
+    current=$(get_active)
+
+    # Save outgoing credentials (token may have been refreshed)
+    if [[ -n "$current" && "$current" != "$name" && -f "$CRED_FILE" ]]; then
+        if [[ -d "$DATA_DIR/$current" ]]; then
+            cp "$CRED_FILE" "$DATA_DIR/$current/credentials.json"
+            chmod 600 "$DATA_DIR/$current/credentials.json"
+        fi
+    fi
+
+    # Load incoming credentials
+    cp "$acct_dir/credentials.json" "$CRED_FILE"
+    chmod 600 "$CRED_FILE"
+    echo "$name" > "$ACTIVE_FILE"
+
+    local sub_type
+    sub_type=$(read_cred_field "$name" "subscriptionType")
+    info "switched to '$name' ($sub_type)"
+    warn "restart Claude Code for the switch to take effect"
+}
+
+cmd_status() {
+    local name="${1:-}"
+    check_deps
+    ensure_data_dir
+
+    if [[ -z "$name" ]]; then
+        name=$(get_active)
+        [[ -z "$name" ]] && die "no active account"
+    fi
+
+    [[ -f "$DATA_DIR/$name/credentials.json" ]] || die "account '$name' not found"
+
+    local sub_type rate_tier
+    sub_type=$(read_cred_field "$name" "subscriptionType")
+    rate_tier=$(read_cred_field "$name" "rateLimitTier")
+
+    printf 'Account:      %s\n' "$name"
+    printf 'Subscription: %s\n' "${sub_type:-unknown}"
+    printf 'Rate tier:    %s\n' "${rate_tier:-unknown}"
+
+    local active
+    active=$(get_active)
+    [[ "$name" == "$active" ]] && printf 'Active:       yes\n' || printf 'Active:       no\n'
+
+    # Live usage query
+    local token
+    token=$(get_token "$name")
+    if [[ -n "$token" ]]; then
+        info "querying live usage..."
+        local usage
+        usage=$(fetch_usage "$token")
+        if [[ -n "$usage" ]]; then
+            local u5 u7 u5_reset u7_reset
+            u5=$(echo "$usage" | jq -r '.five_hour.utilization // "?"')
+            u7=$(echo "$usage" | jq -r '.seven_day.utilization // "?"')
+            u5_reset=$(echo "$usage" | jq -r '.five_hour.resets_at // "?"')
+            u7_reset=$(echo "$usage" | jq -r '.seven_day.resets_at // "?"')
+
+            printf '\n'
+            printf '5-hour:       %s%% (resets %s)\n' "$u5" "$u5_reset"
+            printf '7-day:        %s%% (resets %s)\n' "$u7" "$u7_reset"
+
+            # Per-model breakdown
+            local sonnet_u opus_u
+            sonnet_u=$(echo "$usage" | jq -r '.seven_day_sonnet.utilization // empty')
+            opus_u=$(echo "$usage" | jq -r '.seven_day_opus.utilization // empty')
+            [[ -n "$sonnet_u" ]] && printf '7d sonnet:    %s%%\n' "$sonnet_u" || true
+            [[ -n "$opus_u" ]]   && printf '7d opus:      %s%%\n' "$opus_u" || true
+        else
+            warn "failed to query usage API (token may be expired)"
+        fi
+    fi
+}
+
+cmd_sync() {
+    check_deps
+    ensure_data_dir
+    sync_back
+    local active
+    active=$(get_active)
+    [[ -n "$active" ]] && info "synced live credentials to '$active'" || warn "no active account"
+}
+
+cmd_wrap() {
+    check_deps
+    ensure_data_dir
+
+    local active
+    active=$(get_active)
+
+    if [[ -z "$active" ]]; then
+        warn "no active account set — launching claude without account management"
+        exec claude "$@"
+    fi
+
+    local num_accounts
+    num_accounts=$(count_accounts)
+
+    # Pre-check: should we auto-swap?
+    if [[ -f "$USAGE_CACHE" ]] && ((num_accounts > 1)); then
+        local u5 u7
+        u5=$(jq -r ".[\"$active\"].five_hour.utilization // 0" "$USAGE_CACHE" 2>/dev/null)
+        u7=$(jq -r ".[\"$active\"].seven_day.utilization // 0" "$USAGE_CACHE" 2>/dev/null)
+
+        local swap_needed=false
+        local u5_int="${u5%%.*}" u7_int="${u7%%.*}"
+        ((u5_int >= 90)) && swap_needed=true
+        ((u7_int >= 95)) && swap_needed=true
+
+        if [[ "$swap_needed" == true ]]; then
+            local best
+            best=$(pick_best_account "$active")
+            if [[ -n "$best" ]]; then
+                warn "active account '$active' usage high (5h:${u5}% 7d:${u7}%)"
+                # Perform the switch
+                cmd_switch "$best" 2>/dev/null
+                active="$best"
+                info "auto-switched to '$best'"
+            else
+                warn "all accounts near limits — proceeding with '$active'"
+            fi
+        fi
+    fi
+
+    # Clear rate-limited flag
+    rm -f "$RATE_LIMITED_FLAG"
+
+    # Launch claude in a loop (for restart on rate limit)
+    while true; do
+        info "launching claude (account: $active)"
+
+        # Run claude — don't use exec so we can handle post-exit
+        claude "$@"
+        local exit_code=$?
+
+        # Always sync back
+        sync_back
+
+        # Check rate-limited flag
+        if [[ -f "$RATE_LIMITED_FLAG" ]] && ((num_accounts > 1)); then
+            rm -f "$RATE_LIMITED_FLAG"
+
+            local best
+            best=$(pick_best_account "$active")
+            if [[ -n "$best" ]]; then
+                local b_u5="" b_u7=""
+                if [[ -f "$USAGE_CACHE" ]]; then
+                    b_u5=$(jq -r ".[\"$best\"].five_hour.utilization // \"?\"" "$USAGE_CACHE" 2>/dev/null)
+                    b_u7=$(jq -r ".[\"$best\"].seven_day.utilization // \"?\"" "$USAGE_CACHE" 2>/dev/null)
+                fi
+
+                warn "rate limited on '$active'"
+                cmd_switch "$best" 2>/dev/null
+                active="$best"
+                info "switched to '$best' (5h:${b_u5}% 7d:${b_u7}%)"
+
+                printf '\n'
+                read -rp "Restart claude? [Y/n] " reply
+                case "${reply:-Y}" in
+                    [Yy]*) continue ;;
+                    *)     break ;;
+                esac
+            else
+                warn "rate limited but no other accounts available"
+                break
+            fi
+        else
+            break
+        fi
+    done
+}
+
+cmd_install_hook() {
+    check_deps
+    ensure_data_dir
+
+    local settings="$CLAUDE_DIR/settings.json"
+    [[ -f "$settings" ]] || die "$settings not found"
+
+    local hook_script="$DATA_DIR/rate-limit-hook.sh"
+
+    # Check if hook already installed
+    if jq -e '.hooks.PostToolUseFailure' "$settings" &>/dev/null; then
+        if grep -q "claude-revolver" "$settings" 2>/dev/null; then
+            info "hook already installed"
+            return 0
+        fi
+        warn "PostToolUseFailure hooks already exist — will append"
+    fi
+
+    # Copy hook script to data dir
+    local src_hook
+    src_hook="$(cd "$(dirname "$0")" && pwd)/rate-limit-hook.sh"
+    if [[ -f "$src_hook" ]]; then
+        cp "$src_hook" "$hook_script"
+        chmod 755 "$hook_script"
+    else
+        die "rate-limit-hook.sh not found next to this script"
+    fi
+
+    # Merge hook into settings.json
+    local new_hook
+    new_hook=$(jq --arg cmd "bash $hook_script" '
+        .hooks //= {} |
+        .hooks.PostToolUseFailure //= [] |
+        .hooks.PostToolUseFailure += [{
+            "matcher": ".*",
+            "hooks": [{
+                "type": "command",
+                "command": $cmd,
+                "timeout": 5
+            }]
+        }]
+    ' "$settings")
+
+    atomic_write "$settings" "$new_hook"
+    chmod 644 "$settings"
+    info "PostToolUseFailure hook installed"
+    warn "restart Claude Code for hook to take effect"
+}
+
+cmd_uninstall_hook() {
+    check_deps
+
+    local settings="$CLAUDE_DIR/settings.json"
+    [[ -f "$settings" ]] || die "$settings not found"
+
+    local updated
+    updated=$(jq '
+        if .hooks.PostToolUseFailure then
+            .hooks.PostToolUseFailure |= map(
+                select(.hooks | all(.command | contains("claude-revolver") | not))
+            ) |
+            if (.hooks.PostToolUseFailure | length) == 0 then
+                del(.hooks.PostToolUseFailure)
+            else . end
+        else . end
+    ' "$settings")
+
+    atomic_write "$settings" "$updated"
+    chmod 644 "$settings"
+    info "hook removed from settings"
+}
+
+cmd_install_systemd() {
+    local src_dir
+    src_dir="$(cd "$(dirname "$0")" && pwd)/systemd"
+    local user_unit_dir="$HOME/.config/systemd/user"
+
+    [[ -d "$src_dir" ]] || die "systemd/ directory not found next to this script"
+
+    mkdir -p "$user_unit_dir"
+    cp "$src_dir/claude-revolver-monitor.service" "$user_unit_dir/"
+    cp "$src_dir/claude-revolver-monitor.timer" "$user_unit_dir/"
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now claude-revolver-monitor.timer
+
+    info "systemd timer installed and started"
+    systemctl --user status claude-revolver-monitor.timer --no-pager 2>/dev/null || true
+}
+
+cmd_uninstall_systemd() {
+    systemctl --user disable --now claude-revolver-monitor.timer 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/claude-revolver-monitor.service"
+    rm -f "$HOME/.config/systemd/user/claude-revolver-monitor.timer"
+    systemctl --user daemon-reload
+    info "systemd units removed"
+}
+
+cmd_tui() {
+    check_deps
+    ensure_data_dir
+
+    local accounts=()
+    while IFS= read -r acct; do
+        [[ -n "$acct" ]] && accounts+=("$acct")
+    done < <(list_accounts)
+
+    if ((${#accounts[@]} == 0)); then
+        die "no accounts — use 'claude-revolver add <name>' to save current credentials"
+    fi
+
+    local active
+    active=$(get_active)
+
+    if command -v fzf &>/dev/null; then
+        # Build display lines for fzf
+        local lines=()
+        for acct in "${accounts[@]}"; do
+            local marker=" "
+            [[ "$acct" == "$active" ]] && marker="*"
+
+            local sub_type u5="" u7=""
+            sub_type=$(read_cred_field "$acct" "subscriptionType")
+            local cached
+            cached=$(cached_usage "$acct")
+            if [[ -n "$cached" ]]; then
+                u5=$(echo "$cached" | jq -r '.five_hour.utilization // "?"' 2>/dev/null)
+                u7=$(echo "$cached" | jq -r '.seven_day.utilization // "?"' 2>/dev/null)
+            fi
+
+            lines+=("$(printf '%s %-16s %-8s 5h:%-5s 7d:%-5s' "$marker" "$acct" "${sub_type:-?}" "${u5:-?}%" "${u7:-?}%")")
+        done
+
+        local selected
+        selected=$(printf '%s\n' "${lines[@]}" | fzf \
+            --prompt="switch account > " \
+            --header="current: ${active:-none}" \
+            --ansi \
+            --no-multi \
+            --preview="$0 status {2}" \
+            --preview-window=right:50%:wrap) || return 0
+
+        # Extract account name (second field)
+        local name
+        name=$(echo "$selected" | awk '{print $2}')
+        [[ -n "$name" ]] && cmd_switch "$name"
+    else
+        # Fallback: numbered list with select
+        echo "Select account (current: ${active:-none}):"
+        local i=1
+        for acct in "${accounts[@]}"; do
+            local marker=" "
+            [[ "$acct" == "$active" ]] && marker="*"
+            printf '  %d) %s %s\n' "$i" "$marker" "$acct"
+            ((i++))
+        done
+
+        local choice
+        read -rp "Enter number: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#accounts[@]})); then
+            cmd_switch "${accounts[$((choice - 1))]}"
+        else
+            die "invalid selection"
+        fi
+    fi
+}
+
+cmd_help() {
+    cat <<'EOF'
+claude-revolver — multi-account OAuth manager for Claude Code
+
+Usage: claude-revolver <command> [args]
+
+Commands:
+  (no args)           TUI account picker (fzf)
+  list, ls            List all accounts with usage
+  add <name>          Save current credentials as named account
+  switch, sw <name>   Switch to a named account
+  remove, rm <name>   Remove a named account
+  status [name]       Show account info with live usage
+  sync                Save live credentials back to store
+  wrap [-- args...]   Wrapper mode: launch claude with auto-swap
+
+  install-hook        Add rate-limit detection hook to settings
+  uninstall-hook      Remove the hook
+  install-systemd     Install usage monitor timer
+  uninstall-systemd   Remove systemd units
+
+  version, -v         Show version
+  help, -h, --help    Show this help
+
+Workflow:
+  1. claude login                       # login to account A
+  2. claude-revolver add personal       # save it
+  3. claude logout && claude login      # login to account B
+  4. claude-revolver add work           # save it
+  5. claude-revolver                    # TUI to switch
+  6. claude-revolver wrap               # launch with auto-swap
+
+Optional:
+  claude-revolver install-hook          # detect rate limits in-session
+  claude-revolver install-systemd       # background usage monitoring
+  alias claude='claude-revolver wrap --'  # transparent wrapping
+EOF
+}
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    add)                cmd_add "${2:-}" ;;
+    remove|rm)          cmd_remove "${2:-}" ;;
+    list|ls)            cmd_list ;;
+    switch|sw)          cmd_switch "${2:-}" ;;
+    status|st)          cmd_status "${2:-}" ;;
+    sync)               cmd_sync ;;
+    wrap)               shift; cmd_wrap "$@" ;;
+    install-hook)       cmd_install_hook ;;
+    uninstall-hook)     cmd_uninstall_hook ;;
+    install-systemd)    cmd_install_systemd ;;
+    uninstall-systemd)  cmd_uninstall_systemd ;;
+    version|-v)         echo "claude-revolver $VERSION" ;;
+    help|-h|--help)     cmd_help ;;
+    "")                 cmd_tui ;;
+    *)                  die "unknown command: $1 — run 'claude-revolver help'" ;;
+esac

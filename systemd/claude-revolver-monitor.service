@@ -1,0 +1,9 @@
+[Unit]
+Description=Claude Revolver Usage Monitor
+Documentation=https://github.com/ds1sqe/claude-revolver
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/claude-revolver-monitor
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
