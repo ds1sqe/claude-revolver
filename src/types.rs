@@ -80,6 +80,31 @@ pub struct SwapInfo {
     pub return_after: Option<String>,
 }
 
+// ── Swap history ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapLogEntry {
+    pub timestamp: String,
+    pub from_account: String,
+    pub to_account: String,
+    pub reason: String,
+    pub trigger: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_usage_5h: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_usage_7d: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_usage_5h: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_usage_7d: Option<f64>,
+    #[serde(default)]
+    pub temp_swap: bool,
+}
+
 // ── Session tracking ────────────────────────────────────────────────────────
 
 pub type Sessions = HashMap<String, SessionEntry>;

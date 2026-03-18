@@ -50,6 +50,10 @@ pub fn swap_info_file() -> Result<PathBuf> {
     Ok(data_dir()?.join("swap-info"))
 }
 
+pub fn swap_history_file() -> Result<PathBuf> {
+    Ok(data_dir()?.join("swap-history.json"))
+}
+
 pub fn rate_limited_flag() -> Result<PathBuf> {
     Ok(data_dir()?.join("rate-limited"))
 }

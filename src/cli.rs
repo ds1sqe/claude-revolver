@@ -38,6 +38,16 @@ pub enum Command {
     /// Show session-to-account mapping
     Sessions,
 
+    /// Show swap history log
+    History {
+        /// Number of entries to show
+        #[arg(short = 'n', long, default_value = "20")]
+        count: usize,
+        /// Clear all history
+        #[arg(long)]
+        clear: bool,
+    },
+
     /// Launch claude with auto-swap and auto-resume
     Wrap {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

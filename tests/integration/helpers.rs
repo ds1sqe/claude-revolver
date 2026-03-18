@@ -199,6 +199,36 @@ impl TestEnv {
         self.data_dir.join("rate-limited").exists()
     }
 
+    /// Read swap history.
+    #[allow(dead_code)]
+    pub fn read_swap_history(&self) -> Value {
+        let path = self.data_dir.join("swap-history.json");
+        let content = fs::read_to_string(&path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    /// Write swap history.
+    #[allow(dead_code)]
+    pub fn write_swap_history(&self, entries: &Value) {
+        let path = self.data_dir.join("swap-history.json");
+        fs::write(&path, serde_json::to_string_pretty(entries).unwrap()).unwrap();
+    }
+
+    /// Write Claude Code settings.json.
+    #[allow(dead_code)]
+    pub fn write_settings(&self, settings: &Value) {
+        let path = self.claude_dir.join("settings.json");
+        fs::write(&path, serde_json::to_string_pretty(settings).unwrap()).unwrap();
+    }
+
+    /// Read Claude Code settings.json.
+    #[allow(dead_code)]
+    pub fn read_settings(&self) -> Value {
+        let path = self.claude_dir.join("settings.json");
+        let content = fs::read_to_string(&path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
     /// Read fake claude invocation log.
     pub fn read_claude_invocations(&self) -> Vec<String> {
         let path = self.data_dir.join("claude-invocations.log");

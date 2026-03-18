@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod config;
 mod error;
+mod history;
 mod paths;
 mod strategy;
 mod types;
@@ -26,6 +27,7 @@ fn main() {
             Command::Status { name } => commands::status::run(name.as_deref()),
             Command::Sync => commands::sync::run(),
             Command::Sessions => commands::sessions::run(),
+            Command::History { count, clear } => commands::history::run(count, clear),
             Command::Wrap { args } => commands::wrap::run(&args),
             Command::Config { action } => match action {
                 ConfigAction::Show => commands::config::show(),

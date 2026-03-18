@@ -8,3 +8,5 @@ mod hook_rate_limit_tests;
 mod monitor_tests;
 mod wrap_tests;
 mod config_tests;
+mod history_tests;
+mod install_tests;

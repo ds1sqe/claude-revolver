@@ -1,5 +1,6 @@
 pub mod add;
 pub mod config;
+pub mod history;
 pub mod hook;
 pub mod install;
 pub mod list;

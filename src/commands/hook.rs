@@ -2,8 +2,8 @@ use std::io::Read;
 
 use anyhow::Result;
 
-use crate::types::{RateLimitHookInput, SessionStartHookInput, StopHookInput};
-use crate::{account, config, paths, strategy, usage, util};
+use crate::types::{RateLimitHookInput, SessionStartHookInput, StopHookInput, SwapLogEntry};
+use crate::{account, config, history, paths, strategy, usage, util};
 
 /// Stop hook: check usage, swap if over threshold. Always exits 0.
 pub fn stop() -> Result<()> {
@@ -86,6 +86,21 @@ pub fn stop() -> Result<()> {
     };
 
     util::atomic_write_json(&paths::swap_info_file()?, &swap_info, 0o600)?;
+
+    let _ = history::log_swap(SwapLogEntry {
+        timestamp: swap_info.swapped_at.clone(),
+        from_account: swap_info.from_account.clone(),
+        to_account: swap_info.to_account.clone(),
+        reason: swap_info.reason.clone(),
+        trigger: "stop-hook".to_string(),
+        session_id: Some(swap_info.session_id.clone()),
+        cwd: hook_input.cwd.clone(),
+        from_usage_5h: current_usage.five_hour.as_ref().map(|w| w.utilization),
+        from_usage_7d: current_usage.seven_day.as_ref().map(|w| w.utilization),
+        to_usage_5h: cache.get(&swap_info.to_account).and_then(|u| u.five_hour.as_ref()).map(|w| w.utilization),
+        to_usage_7d: cache.get(&swap_info.to_account).and_then(|u| u.seven_day.as_ref()).map(|w| w.utilization),
+        temp_swap: is_temp,
+    });
 
     // Clear rate-limited flag
     let _ = std::fs::remove_file(paths::rate_limited_flag()?);

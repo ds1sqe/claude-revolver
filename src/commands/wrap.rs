@@ -3,7 +3,8 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::{account, config, paths, strategy, usage, util};
+use crate::types::SwapLogEntry;
+use crate::{account, config, history, paths, strategy, usage, util};
 
 pub fn run(args: &[String]) -> Result<()> {
     let config = config::Config::load().unwrap_or_default();
@@ -26,6 +27,21 @@ pub fn run(args: &[String]) -> Result<()> {
                 if let Some(next) = strategy::select_next_account(&active, &accounts, &cache, &config) {
                     util::print_warn(&format!("active account '{active}' usage high ({reason})"));
                     account::swap_credentials(&active, &next)?;
+                    let next_usage = cache.get(&next);
+                    let _ = history::log_swap(SwapLogEntry {
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        from_account: active.clone(),
+                        to_account: next.clone(),
+                        reason: reason.clone(),
+                        trigger: "wrap-precheck".to_string(),
+                        session_id: None,
+                        cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
+                        from_usage_5h: current_usage.five_hour.as_ref().map(|w| w.utilization),
+                        from_usage_7d: current_usage.seven_day.as_ref().map(|w| w.utilization),
+                        to_usage_5h: next_usage.and_then(|u| u.five_hour.as_ref()).map(|w| w.utilization),
+                        to_usage_7d: next_usage.and_then(|u| u.seven_day.as_ref()).map(|w| w.utilization),
+                        temp_swap: false,
+                    });
                     active = next.clone();
                     util::print_info(&format!("auto-switched to '{next}'"));
                 } else {
@@ -122,6 +138,22 @@ pub fn run(args: &[String]) -> Result<()> {
             {
                 util::print_warn(&format!("rate limited on '{active}'"));
                 account::swap_credentials(&active, &next)?;
+                let from_usage = cache.get(&active);
+                let to_usage = cache.get(&next);
+                let _ = history::log_swap(SwapLogEntry {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    from_account: active.clone(),
+                    to_account: next.clone(),
+                    reason: "rate limit hit during session".to_string(),
+                    trigger: "wrap-rate-limit".to_string(),
+                    session_id: None,
+                    cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
+                    from_usage_5h: from_usage.and_then(|u| u.five_hour.as_ref()).map(|w| w.utilization),
+                    from_usage_7d: from_usage.and_then(|u| u.seven_day.as_ref()).map(|w| w.utilization),
+                    to_usage_5h: to_usage.and_then(|u| u.five_hour.as_ref()).map(|w| w.utilization),
+                    to_usage_7d: to_usage.and_then(|u| u.seven_day.as_ref()).map(|w| w.utilization),
+                    temp_swap: false,
+                });
                 active = next.clone();
                 util::print_info(&format!("switched to '{next}'"));
 

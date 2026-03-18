@@ -12,15 +12,6 @@ pub fn install_hook() -> Result<()> {
     let content = std::fs::read_to_string(&settings_path)?;
     let mut settings: serde_json::Value = serde_json::from_str(&content)?;
 
-    // Check if already installed
-    if let Some(hooks) = settings.get("hooks") {
-        let hooks_str = serde_json::to_string(hooks)?;
-        if hooks_str.contains("claude-revolver") {
-            print_info("hooks already installed");
-            return Ok(());
-        }
-    }
-
     let hooks = settings
         .as_object_mut()
         .context("settings is not an object")?
@@ -31,43 +22,32 @@ pub fn install_hook() -> Result<()> {
         .as_object_mut()
         .context("hooks is not an object")?;
 
+    let mut installed = Vec::new();
+
     // Install Stop hook
-    let stop_entry = serde_json::json!([{
-        "matcher": ".*",
-        "hooks": [{
-            "type": "command",
-            "command": "claude-revolver hook stop",
-            "timeout": 10
-        }]
-    }]);
-    merge_hook_array(hooks_obj, "Stop", stop_entry);
+    if upsert_hook(hooks_obj, "Stop", "claude-revolver hook stop", 10) {
+        installed.push("Stop");
+    }
 
     // Install SessionStart hook
-    let session_start_entry = serde_json::json!([{
-        "matcher": ".*",
-        "hooks": [{
-            "type": "command",
-            "command": "claude-revolver hook session-start",
-            "timeout": 5
-        }]
-    }]);
-    merge_hook_array(hooks_obj, "SessionStart", session_start_entry);
+    if upsert_hook(hooks_obj, "SessionStart", "claude-revolver hook session-start", 5) {
+        installed.push("SessionStart");
+    }
 
     // Install PostToolUseFailure hook
-    let rate_limit_entry = serde_json::json!([{
-        "matcher": ".*",
-        "hooks": [{
-            "type": "command",
-            "command": "claude-revolver hook rate-limit",
-            "timeout": 5
-        }]
-    }]);
-    merge_hook_array(hooks_obj, "PostToolUseFailure", rate_limit_entry);
+    if upsert_hook(hooks_obj, "PostToolUseFailure", "claude-revolver hook rate-limit", 5) {
+        installed.push("PostToolUseFailure");
+    }
+
+    if installed.is_empty() {
+        print_info("all hooks already installed");
+        return Ok(());
+    }
 
     let json = serde_json::to_string_pretty(&settings)?;
     atomic_write(&settings_path, json.as_bytes(), 0o644)?;
 
-    print_info("hooks installed (Stop, SessionStart, PostToolUseFailure)");
+    print_info(&format!("hooks installed ({})", installed.join(", ")));
     print_warn("restart Claude Code for hooks to take effect");
     Ok(())
 }
@@ -158,17 +138,39 @@ pub fn uninstall_systemd() -> Result<()> {
     Ok(())
 }
 
-/// Merge a hook entry array into the existing hooks, appending to existing arrays.
-fn merge_hook_array(
+/// Insert a hook entry if no claude-revolver entry exists for this hook type.
+/// Returns true if a new entry was added, false if already present.
+fn upsert_hook(
     hooks: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
-    new_entries: serde_json::Value,
-) {
-    let existing = hooks
+    command: &str,
+    timeout: u64,
+) -> bool {
+    let arr = hooks
         .entry(key)
-        .or_insert_with(|| serde_json::json!([]));
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .expect("hook value should be an array");
 
-    if let (Some(arr), Some(new_arr)) = (existing.as_array_mut(), new_entries.as_array()) {
-        arr.extend(new_arr.iter().cloned());
+    // Check if claude-revolver entry already exists
+    let already = arr.iter().any(|entry| {
+        serde_json::to_string(entry)
+            .unwrap_or_default()
+            .contains("claude-revolver")
+    });
+
+    if already {
+        return false;
     }
+
+    arr.push(serde_json::json!({
+        "matcher": ".*",
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": timeout
+        }]
+    }));
+
+    true
 }
