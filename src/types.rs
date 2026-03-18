@@ -46,7 +46,8 @@ pub struct CachedAccountUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageWindow {
     pub utilization: f64,
-    pub resets_at: String,
+    #[serde(default)]
+    pub resets_at: Option<String>,
 }
 
 // ── Usage API response ──────────────────────────────────────────────────────

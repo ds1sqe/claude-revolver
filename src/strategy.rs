@@ -170,11 +170,11 @@ mod tests {
         CachedAccountUsage {
             five_hour: Some(UsageWindow {
                 utilization: five_h,
-                resets_at: "2026-03-18T04:00:00Z".to_string(),
+                resets_at: Some("2026-03-18T04:00:00Z".to_string()),
             }),
             seven_day: Some(UsageWindow {
                 utilization: seven_d,
-                resets_at: "2026-03-20T04:00:00Z".to_string(),
+                resets_at: Some("2026-03-20T04:00:00Z".to_string()),
             }),
             seven_day_sonnet: None,
             seven_day_opus: None,

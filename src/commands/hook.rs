@@ -66,7 +66,7 @@ pub fn stop() -> Result<()> {
         current_usage
             .five_hour
             .as_ref()
-            .map(|w| w.resets_at.clone())
+            .and_then(|w| w.resets_at.clone())
     } else {
         None
     };

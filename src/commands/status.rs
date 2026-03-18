@@ -40,10 +40,12 @@ pub fn run(name: Option<&str>) -> Result<()> {
         Ok(resp) => {
             println!();
             if let Some(ref w) = resp.five_hour {
-                println!("5-hour:       {:.0}% (resets {})", w.utilization, w.resets_at);
+                let resets = w.resets_at.as_deref().unwrap_or("?");
+                println!("5-hour:       {:.0}% (resets {resets})", w.utilization);
             }
             if let Some(ref w) = resp.seven_day {
-                println!("7-day:        {:.0}% (resets {})", w.utilization, w.resets_at);
+                let resets = w.resets_at.as_deref().unwrap_or("?");
+                println!("7-day:        {:.0}% (resets {resets})", w.utilization);
             }
             if let Some(ref w) = resp.seven_day_sonnet {
                 println!("7d sonnet:    {:.0}%", w.utilization);

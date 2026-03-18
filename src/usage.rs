@@ -92,11 +92,11 @@ mod tests {
         let usage = CachedAccountUsage {
             five_hour: Some(UsageWindow {
                 utilization: 20.0,
-                resets_at: String::new(),
+                resets_at: None,
             }),
             seven_day: Some(UsageWindow {
                 utilization: 96.0,
-                resets_at: String::new(),
+                resets_at: None,
             }),
             seven_day_sonnet: None,
             seven_day_opus: None,
@@ -117,11 +117,11 @@ mod tests {
         let usage = CachedAccountUsage {
             five_hour: Some(UsageWindow {
                 utilization: 20.0,
-                resets_at: String::new(),
+                resets_at: None,
             }),
             seven_day: Some(UsageWindow {
                 utilization: 50.0,
-                resets_at: String::new(),
+                resets_at: None,
             }),
             seven_day_sonnet: None,
             seven_day_opus: None,
@@ -138,11 +138,11 @@ mod tests {
         let usage = CachedAccountUsage {
             five_hour: Some(UsageWindow {
                 utilization: 99.0,
-                resets_at: String::new(),
+                resets_at: None,
             }),
             seven_day: Some(UsageWindow {
                 utilization: 99.0,
-                resets_at: String::new(),
+                resets_at: None,
             }),
             seven_day_sonnet: None,
             seven_day_opus: None,
