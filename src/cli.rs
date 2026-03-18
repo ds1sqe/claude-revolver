@@ -69,17 +69,11 @@ pub enum Command {
         kind: HookKind,
     },
 
-    /// Install hooks or systemd units
-    Install {
-        #[command(subcommand)]
-        target: InstallTarget,
-    },
+    /// Install hooks and systemd timer
+    Install,
 
-    /// Uninstall hooks or systemd units
-    Uninstall {
-        #[command(subcommand)]
-        target: InstallTarget,
-    },
+    /// Uninstall hooks and systemd timer
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -100,10 +94,3 @@ pub enum ConfigAction {
     Set { key: String, value: String },
 }
 
-#[derive(Subcommand, Clone)]
-pub enum InstallTarget {
-    /// Install/uninstall Claude Code hooks
-    Hook,
-    /// Install/uninstall systemd user timer
-    Systemd,
-}

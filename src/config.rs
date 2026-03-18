@@ -37,7 +37,7 @@ pub struct StrategyConfig {
 }
 
 fn default_poll_interval() -> u64 {
-    300
+    60
 }
 fn default_true() -> bool {
     true
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.poll_interval_seconds, 300);
+        assert_eq!(config.poll_interval_seconds, 60);
         assert_eq!(config.thresholds.five_hour, 90);
         assert_eq!(config.thresholds.seven_day, 95);
         assert_eq!(config.strategy.strategy_type, "drain");

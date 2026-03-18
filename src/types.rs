@@ -66,19 +66,25 @@ pub struct UsageApiResponse {
     pub seven_day_cowork: Option<UsageWindow>,
 }
 
-// ── Swap info ───────────────────────────────────────────────────────────────
+// ── Signal types (hooks → wrapper, PID-namespaced) ──────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SwapInfo {
+pub struct SessionStartedSignal {
     pub session_id: String,
-    pub from_account: String,
-    pub to_account: String,
-    pub reason: String,
-    pub swapped_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub return_to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub return_after: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoppedSignal {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitSignal {
+    pub timestamp: String,
 }
 
 // ── Swap history ───────────────────────────────────────────────────────────
@@ -123,11 +129,6 @@ pub struct SessionEntry {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StopHookInput {
     pub session_id: String,
-    #[serde(default)]
-    pub stop_hook_active: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

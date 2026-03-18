@@ -116,35 +116,29 @@ impl TestEnv {
         fs::write(&path, serde_json::to_string_pretty(sessions).unwrap()).unwrap();
     }
 
-    /// Write swap-info.
-    pub fn write_swap_info(&self, info: &Value) {
-        let path = self.data_dir.join("swap-info");
-        fs::write(&path, serde_json::to_string_pretty(info).unwrap()).unwrap();
+    /// Write a PID-namespaced signal file.
+    pub fn write_signal(&self, wrapper_pid: u32, name: &str, content: &Value) {
+        let dir = self.data_dir.join("signals");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{wrapper_pid}-{name}"));
+        fs::write(&path, serde_json::to_string_pretty(content).unwrap()).unwrap();
     }
 
-    /// Create rate-limited flag.
-    pub fn set_rate_limited(&self) {
-        fs::write(
-            self.data_dir.join("rate-limited"),
-            "2026-03-18T12:00:00Z",
-        )
-        .unwrap();
+    /// Check if a signal file exists.
+    pub fn signal_exists(&self, wrapper_pid: u32, name: &str) -> bool {
+        self.data_dir
+            .join("signals")
+            .join(format!("{wrapper_pid}-{name}"))
+            .exists()
     }
 
-    /// Stage swap-info for the fake claude to activate.
-    pub fn stage_swap_info(&self, info: &Value) {
-        let path = self.data_dir.join("staged-swap-info");
-        fs::write(&path, serde_json::to_string_pretty(info).unwrap()).unwrap();
-    }
-
-    /// Stage rate-limited flag for the fake claude to activate.
-    #[allow(dead_code)]
-    pub fn stage_rate_limited(&self) {
-        fs::write(
-            self.data_dir.join("staged-rate-limited"),
-            "2026-03-18T12:00:00Z",
-        )
-        .unwrap();
+    /// Read a signal file.
+    pub fn read_signal(&self, wrapper_pid: u32, name: &str) -> Value {
+        let path = self.data_dir
+            .join("signals")
+            .join(format!("{wrapper_pid}-{name}"));
+        let content = fs::read_to_string(&path).unwrap();
+        serde_json::from_str(&content).unwrap()
     }
 
     // ── Assertions ─────────────────────────────────────────────────
@@ -184,20 +178,6 @@ impl TestEnv {
         serde_json::from_str(&content).unwrap()
     }
 
-    /// Read swap-info.
-    pub fn read_swap_info(&self) -> Value {
-        let path = self.data_dir.join("swap-info");
-        let content = fs::read_to_string(&path).unwrap();
-        serde_json::from_str(&content).unwrap()
-    }
-
-    pub fn swap_info_exists(&self) -> bool {
-        self.data_dir.join("swap-info").exists()
-    }
-
-    pub fn rate_limited_exists(&self) -> bool {
-        self.data_dir.join("rate-limited").exists()
-    }
 
     /// Read swap history.
     #[allow(dead_code)]
@@ -339,7 +319,7 @@ pub fn fake_api_response(five_hour: f64, seven_day: f64) -> Value {
 /// Generate a config JSON with overrides merged into defaults.
 pub fn fake_config(overrides: Value) -> Value {
     let mut base = json!({
-        "poll_interval_seconds": 300,
+        "poll_interval_seconds": 60,
         "thresholds": {
             "five_hour": 90,
             "seven_day": 95

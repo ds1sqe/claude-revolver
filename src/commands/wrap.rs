@@ -1,48 +1,100 @@
-use std::io::Write;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::types::SwapLogEntry;
-use crate::{account, config, history, paths, strategy, usage, util};
+use crate::types::{RateLimitSignal, SessionStartedSignal, StoppedSignal};
+use crate::{account, config, paths, sessions, strategy, swap, usage, util};
+
+struct WrapperState {
+    wrapper_pid: u32,
+    active: String,
+    args: Vec<String>,
+    session_id: Option<String>,
+    config: config::Config,
+}
+
+impl WrapperState {
+    fn signal_path(&self, name: &str) -> Result<std::path::PathBuf> {
+        paths::signal_file(self.wrapper_pid, name)
+    }
+
+    fn clear_signals(&self) -> Result<()> {
+        let dir = paths::signals_dir()?;
+        if !dir.exists() {
+            return Ok(());
+        }
+        let prefix = format!("{}-", self.wrapper_pid);
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn read_signal<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
+    if !path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let val: T = serde_json::from_str(&content).ok()?;
+    let _ = std::fs::remove_file(path);
+    Some(val)
+}
 
 pub fn run(args: &[String]) -> Result<()> {
     let config = config::Config::load().unwrap_or_default();
-    let accounts = account::list_accounts()?;
-
-    let mut active = match account::get_active()? {
-        Some(a) => a,
-        None => {
-            util::print_warn("no active account set — launching claude without account management");
-            return exec_claude(args);
-        }
+    let mut state = WrapperState {
+        wrapper_pid: std::process::id(),
+        active: match account::get_active()? {
+            Some(a) => a,
+            None => {
+                util::print_warn(
+                    "no active account set — launching claude without account management",
+                );
+                return exec_claude(args);
+            }
+        },
+        args: args.to_vec(),
+        session_id: None,
+        config,
     };
 
-    // Pre-check: should we auto-swap before launching?
+    let accounts = account::list_accounts()?;
+
+    // Pre-check: swap before first launch if already over threshold
     if accounts.len() > 1 {
         let cache = usage::load_cache().unwrap_or_default();
-        if let Some(current_usage) = cache.get(&active) {
-            let (over, reason) = usage::is_over_threshold(current_usage, &config.thresholds);
+        if let Some(current_usage) = cache.get(&state.active) {
+            let (over, reason) = usage::is_over_threshold(current_usage, &state.config.thresholds);
             if over {
-                if let Some(next) = strategy::select_next_account(&active, &accounts, &cache, &config) {
-                    util::print_warn(&format!("active account '{active}' usage high ({reason})"));
-                    account::swap_credentials(&active, &next)?;
-                    let next_usage = cache.get(&next);
-                    let _ = history::log_swap(SwapLogEntry {
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        from_account: active.clone(),
-                        to_account: next.clone(),
-                        reason: reason.clone(),
-                        trigger: "wrap-precheck".to_string(),
-                        session_id: None,
-                        cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
-                        from_usage_5h: current_usage.five_hour.as_ref().map(|w| w.utilization),
-                        from_usage_7d: current_usage.seven_day.as_ref().map(|w| w.utilization),
-                        to_usage_5h: next_usage.and_then(|u| u.five_hour.as_ref()).map(|w| w.utilization),
-                        to_usage_7d: next_usage.and_then(|u| u.seven_day.as_ref()).map(|w| w.utilization),
-                        temp_swap: false,
-                    });
-                    active = next.clone();
+                if let Some(next) =
+                    strategy::select_next_account(&state.active, &accounts, &cache, &state.config)
+                {
+                    util::print_warn(&format!(
+                        "active account '{}' usage high ({reason})",
+                        state.active
+                    ));
+                    swap::perform_swap(
+                        &state.active,
+                        &next,
+                        &reason,
+                        "precheck",
+                        None,
+                        std::env::current_dir()
+                            .ok()
+                            .map(|p| p.display().to_string())
+                            .as_deref(),
+                        false,
+                    )?;
+                    state.active = next.clone();
                     util::print_info(&format!("auto-switched to '{next}'"));
                 } else {
                     util::print_warn("all accounts near limits — proceeding with current");
@@ -51,126 +103,151 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     }
 
-    // Main loop: launch claude, check swap-info on exit, optionally resume
+    // Ensure signals dir exists
+    util::ensure_dir(&paths::signals_dir()?, 0o700)?;
+
+    let mut killed_for_swap;
+
     loop {
-        util::print_info(&format!("launching claude (account: {active})"));
+        state.clear_signals()?;
+        state.session_id = None;
+        killed_for_swap = false;
 
-        // Clear flags
-        let _ = std::fs::remove_file(paths::rate_limited_flag()?);
-        let _ = std::fs::remove_file(paths::swap_info_file()?);
+        util::print_info(&format!("launching claude (account: {})", state.active));
 
-        // Launch claude
-        let status = Command::new("claude")
-            .args(args)
-            .status()
+        let mut child = Command::new("claude")
+            .env("CLAUDE_REVOLVER_WRAPPED", "1")
+            .env(
+                "CLAUDE_REVOLVER_WRAPPER_PID",
+                state.wrapper_pid.to_string(),
+            )
+            .args(&state.args)
+            .spawn()
             .map_err(|e| anyhow::anyhow!("failed to launch claude: {e}"))?;
 
-        // Always sync back
+        // ── Poll loop: monitor signals while claude runs ──
+        let exit_status = loop {
+            // Child exited naturally
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+
+            // Learn session_id from SessionStart hook
+            if state.session_id.is_none() {
+                if let Some(s) = read_signal::<SessionStartedSignal>(
+                    &state.signal_path("session-started")?,
+                ) {
+                    state.session_id = Some(s.session_id.clone());
+                    let _ = sessions::register(
+                        &s.session_id,
+                        &state.active,
+                        s.cwd,
+                        s.source,
+                    );
+                }
+            }
+
+            // Rate limit → kill immediately
+            if state.signal_path("rate-limited")?.exists() {
+                killed_for_swap = true;
+                let _ = child.kill();
+                break child.wait()?;
+            }
+
+            // Turn ended → wrapper evaluates threshold
+            if let Some(_stopped) =
+                read_signal::<StoppedSignal>(&state.signal_path("stopped")?)
+            {
+                let cache = usage::load_cache().unwrap_or_default();
+                if let Some(current) = cache.get(&state.active) {
+                    let (over, _) =
+                        usage::is_over_threshold(current, &state.config.thresholds);
+                    if over {
+                        killed_for_swap = true;
+                        let _ = child.kill();
+                        break child.wait()?;
+                    }
+                }
+                // Under threshold — do nothing, claude keeps running
+            }
+
+            std::thread::sleep(Duration::from_secs(1));
+        };
+
+        // ── Post-exit ──
         let _ = account::sync_back();
 
-        // Check swap-info (written by the Stop hook)
-        let swap_info_path = paths::swap_info_file()?;
-        if swap_info_path.exists() {
-            let content = std::fs::read_to_string(&swap_info_path)?;
-            let swap_info: crate::types::SwapInfo = serde_json::from_str(&content)?;
-            let _ = std::fs::remove_file(&swap_info_path);
-
-            active = swap_info.to_account.clone();
-
-            if config.auto_resume {
-                let cache = usage::load_cache().unwrap_or_default();
-                let u5 = cache
-                    .get(&active)
-                    .and_then(|u| u.five_hour.as_ref())
-                    .map(|w| format!("{:.0}%", w.utilization))
-                    .unwrap_or_else(|| "?".to_string());
-                let u7 = cache
-                    .get(&active)
-                    .and_then(|u| u.seven_day.as_ref())
-                    .map(|w| format!("{:.0}%", w.utilization))
-                    .unwrap_or_else(|| "?".to_string());
-
-                util::print_warn(&format!(
-                    "swapped from '{}' to '{}' (5h:{u5} 7d:{u7}): {}",
-                    swap_info.from_account, active, swap_info.reason
-                ));
-                util::print_info(&format!(
-                    "auto-resuming session {}",
-                    swap_info.session_id
-                ));
-
-                // Resume with the configured message
-                let _status = Command::new("claude")
-                    .args(["--resume", &swap_info.session_id, &config.auto_message])
-                    .status()
-                    .map_err(|e| anyhow::anyhow!("failed to resume claude: {e}"))?;
-
-                let _ = account::sync_back();
-
-                // Check again for another swap
-                if paths::swap_info_file()?.exists() {
-                    continue;
-                }
-
-                return Ok(());
-            } else {
-                // Manual resume mode
-                println!();
-                util::print_warn(&format!(
-                    "swapped from '{}' to '{}': {}",
-                    swap_info.from_account, active, swap_info.reason
-                ));
-                println!(
-                    "Resume: claude --resume {} \"{}\"",
-                    swap_info.session_id, config.auto_message
-                );
-                return Ok(());
-            }
-        }
-
-        // Check rate-limited flag (set by PostToolUseFailure hook, no swap-info from Stop hook)
-        if paths::rate_limited_flag()?.exists() && accounts.len() > 1 {
-            let _ = std::fs::remove_file(paths::rate_limited_flag()?);
+        if killed_for_swap {
+            // Read remaining signals
+            let _ = read_signal::<RateLimitSignal>(&state.signal_path("rate-limited")?);
 
             let cache = usage::load_cache().unwrap_or_default();
-            if let Some(next) =
-                strategy::select_next_account(&active, &accounts, &cache, &config)
-            {
-                util::print_warn(&format!("rate limited on '{active}'"));
-                account::swap_credentials(&active, &next)?;
-                let from_usage = cache.get(&active);
-                let to_usage = cache.get(&next);
-                let _ = history::log_swap(SwapLogEntry {
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    from_account: active.clone(),
-                    to_account: next.clone(),
-                    reason: "rate limit hit during session".to_string(),
-                    trigger: "wrap-rate-limit".to_string(),
-                    session_id: None,
-                    cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
-                    from_usage_5h: from_usage.and_then(|u| u.five_hour.as_ref()).map(|w| w.utilization),
-                    from_usage_7d: from_usage.and_then(|u| u.seven_day.as_ref()).map(|w| w.utilization),
-                    to_usage_5h: to_usage.and_then(|u| u.five_hour.as_ref()).map(|w| w.utilization),
-                    to_usage_7d: to_usage.and_then(|u| u.seven_day.as_ref()).map(|w| w.utilization),
-                    temp_swap: false,
-                });
-                active = next.clone();
-                util::print_info(&format!("switched to '{next}'"));
+            let accounts = account::list_accounts()?;
 
-                print!("\nRestart claude? [Y/n] ");
-                std::io::stdout().flush()?;
-                let mut reply = String::new();
-                std::io::stdin().read_line(&mut reply)?;
-                if reply.trim().is_empty() || reply.trim().starts_with(['Y', 'y']) {
-                    continue;
+            let reason = if let Some(current) = cache.get(&state.active) {
+                let (_, reason) =
+                    usage::is_over_threshold(current, &state.config.thresholds);
+                if reason.is_empty() {
+                    "rate limit hit".to_string()
+                } else {
+                    reason
                 }
             } else {
-                util::print_warn("rate limited but no other accounts available");
+                "rate limit hit".to_string()
+            };
+
+            if let Some(next) = strategy::select_next_account(
+                &state.active,
+                &accounts,
+                &cache,
+                &state.config,
+            ) {
+                let trigger = "threshold";
+
+                util::print_warn(&format!(
+                    "swapped from '{}' to '{next}': {reason}",
+                    state.active
+                ));
+
+                swap::perform_swap(
+                    &state.active,
+                    &next,
+                    &reason,
+                    trigger,
+                    state.session_id.as_deref(),
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.display().to_string())
+                        .as_deref(),
+                    false,
+                )?;
+
+                state.active = next;
+
+                if state.config.auto_resume {
+                    if let Some(ref sid) = state.session_id {
+                        util::print_info(&format!("auto-resuming session {sid}"));
+                        state.args = vec![
+                            "--resume".into(),
+                            sid.clone(),
+                            state.config.auto_message.clone(),
+                        ];
+                        continue; // re-enter loop
+                    }
+                }
+                // No session_id or no auto_resume → exit
+                return Ok(());
+            } else {
+                util::print_warn("no accounts available for swap");
             }
         }
 
         // Normal exit
-        std::process::exit(status.code().unwrap_or(0));
+        if let Some(ref sid) = state.session_id {
+            let _ = sessions::close(sid);
+        }
+        state.clear_signals()?;
+        std::process::exit(exit_status.code().unwrap_or(0));
     }
 }
 

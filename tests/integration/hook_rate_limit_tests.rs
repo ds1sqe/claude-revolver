@@ -1,95 +1,98 @@
+use serde_json::json;
+
 use crate::helpers::TestEnv;
 
-#[test]
-fn rate_limit_creates_flag_on_type() {
-    let env = TestEnv::new();
+const WRAPPER_PID: u32 = 99999;
 
-    env.cmd()
-        .args(["hook", "rate-limit"])
-        .write_stdin(r#"{"error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}"#)
-        .assert()
-        .success();
-
-    assert!(env.rate_limited_exists());
+fn hook_cmd(env: &TestEnv) -> assert_cmd::Command {
+    let mut c = env.cmd();
+    c.env("CLAUDE_REVOLVER_WRAPPED", "1")
+        .env("CLAUDE_REVOLVER_WRAPPER_PID", WRAPPER_PID.to_string());
+    c
 }
 
 #[test]
-fn rate_limit_creates_flag_on_message() {
+fn rate_limit_noop_without_wrapped_env() {
     let env = TestEnv::new();
 
     env.cmd()
         .args(["hook", "rate-limit"])
-        .write_stdin(r#"{"error":{"type":"unknown","message":"usage limit reached"}}"#)
+        .write_stdin(
+            json!({"error": {"type": "rate_limit_error", "message": "Rate limit"}}).to_string(),
+        )
         .assert()
         .success();
 
-    assert!(env.rate_limited_exists());
+    assert!(!env.signal_exists(WRAPPER_PID, "rate-limited"));
 }
 
 #[test]
-fn rate_limit_creates_flag_on_case_variation() {
+fn rate_limit_writes_signal_on_type_match() {
     let env = TestEnv::new();
 
-    env.cmd()
+    hook_cmd(&env)
         .args(["hook", "rate-limit"])
-        .write_stdin(r#"{"error":{"type":"unknown","message":"Rate limit hit"}}"#)
+        .write_stdin(
+            json!({"error": {"type": "rate_limit_error", "message": "too fast"}}).to_string(),
+        )
         .assert()
         .success();
 
-    assert!(env.rate_limited_exists());
+    assert!(env.signal_exists(WRAPPER_PID, "rate-limited"));
+    let sig = env.read_signal(WRAPPER_PID, "rate-limited");
+    assert!(sig["timestamp"].as_str().is_some());
 }
 
 #[test]
-fn rate_limit_ignores_other_errors() {
+fn rate_limit_writes_signal_on_message_match() {
     let env = TestEnv::new();
 
-    env.cmd()
+    hook_cmd(&env)
         .args(["hook", "rate-limit"])
-        .write_stdin(r#"{"error":{"type":"api_error","message":"Server error"}}"#)
+        .write_stdin(
+            json!({"error": {"type": "other", "message": "Rate limit exceeded"}}).to_string(),
+        )
         .assert()
         .success();
 
-    assert!(!env.rate_limited_exists());
+    assert!(env.signal_exists(WRAPPER_PID, "rate-limited"));
+}
+
+#[test]
+fn rate_limit_ignores_non_rate_limit_error() {
+    let env = TestEnv::new();
+
+    hook_cmd(&env)
+        .args(["hook", "rate-limit"])
+        .write_stdin(
+            json!({"error": {"type": "invalid_request", "message": "bad param"}}).to_string(),
+        )
+        .assert()
+        .success();
+
+    assert!(!env.signal_exists(WRAPPER_PID, "rate-limited"));
 }
 
 #[test]
 fn rate_limit_ignores_null_error() {
     let env = TestEnv::new();
 
-    env.cmd()
+    hook_cmd(&env)
         .args(["hook", "rate-limit"])
-        .write_stdin(r#"{"error":null}"#)
+        .write_stdin(json!({"error": null}).to_string())
         .assert()
         .success();
 
-    assert!(!env.rate_limited_exists());
+    assert!(!env.signal_exists(WRAPPER_PID, "rate-limited"));
 }
 
 #[test]
-fn rate_limit_malformed_noop() {
+fn rate_limit_malformed_input_does_not_crash() {
     let env = TestEnv::new();
 
-    env.cmd()
+    hook_cmd(&env)
         .args(["hook", "rate-limit"])
-        .write_stdin("not json")
+        .write_stdin("not json at all")
         .assert()
         .success();
-
-    assert!(!env.rate_limited_exists());
-}
-
-#[test]
-fn rate_limit_flag_contains_timestamp() {
-    let env = TestEnv::new();
-
-    env.cmd()
-        .args(["hook", "rate-limit"])
-        .write_stdin(r#"{"error":{"type":"rate_limit_error","message":"limit"}}"#)
-        .assert()
-        .success();
-
-    let content = std::fs::read_to_string(env.root.path().join("data/rate-limited")).unwrap();
-    // Should be a valid RFC 3339 timestamp
-    assert!(content.contains("T"));
-    assert!(content.contains("Z") || content.contains("+"));
 }

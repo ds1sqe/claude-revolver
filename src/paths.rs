@@ -46,16 +46,17 @@ pub fn sessions_file() -> Result<PathBuf> {
     Ok(data_dir()?.join("sessions.json"))
 }
 
-pub fn swap_info_file() -> Result<PathBuf> {
-    Ok(data_dir()?.join("swap-info"))
-}
-
 pub fn swap_history_file() -> Result<PathBuf> {
     Ok(data_dir()?.join("swap-history.json"))
 }
 
-pub fn rate_limited_flag() -> Result<PathBuf> {
-    Ok(data_dir()?.join("rate-limited"))
+pub fn signals_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("signals"))
+}
+
+/// PID-namespaced signal path: signals/{pid}-{name}
+pub fn signal_file(wrapper_pid: u32, name: &str) -> Result<PathBuf> {
+    Ok(signals_dir()?.join(format!("{wrapper_pid}-{name}")))
 }
 
 pub fn account_dir(name: &str) -> Result<PathBuf> {

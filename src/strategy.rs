@@ -1,5 +1,5 @@
 use crate::config::{Config, StrategyConfig};
-use crate::types::{CachedAccountUsage, SwapInfo, UsageCache};
+use crate::types::UsageCache;
 
 /// Select the next account to swap to based on the configured strategy.
 /// Returns None if no suitable account is found.
@@ -9,13 +9,6 @@ pub fn select_next_account(
     cache: &UsageCache,
     config: &Config,
 ) -> Option<String> {
-    // Check for 5h temp-swap return first
-    if let Some(name) = check_temp_swap_return(current) {
-        if accounts.contains(&name) {
-            return Some(name);
-        }
-    }
-
     match config.strategy.strategy_type.as_str() {
         "drain" => select_drain(current, accounts, cache, &config.strategy),
         "balanced" => select_balanced(current, accounts, cache),
@@ -119,52 +112,10 @@ fn get_five_hour_util(cache: &UsageCache, name: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Check if there's a pending temp-swap return.
-fn check_temp_swap_return(current: &str) -> Option<String> {
-    let path = crate::paths::swap_info_file().ok()?;
-    if !path.exists() {
-        return None;
-    }
-
-    let content = std::fs::read_to_string(&path).ok()?;
-    let info: SwapInfo = serde_json::from_str(&content).ok()?;
-
-    // If there's a return_to and return_after has passed
-    let return_to = info.return_to.as_ref()?;
-    let return_after = info.return_after.as_ref()?;
-
-    if info.to_account != current {
-        return None;
-    }
-
-    let return_time = chrono::DateTime::parse_from_rfc3339(return_after).ok()?;
-    let now = chrono::Utc::now();
-
-    if now >= return_time {
-        Some(return_to.clone())
-    } else {
-        None
-    }
-}
-
-/// Determine if this is a 5h temp-swap (5h over threshold but 7d is fine).
-pub fn is_five_hour_temp_swap(usage: &CachedAccountUsage, thresholds: &crate::config::Thresholds) -> bool {
-    let five_over = usage
-        .five_hour
-        .as_ref()
-        .map_or(false, |w| w.utilization >= thresholds.five_hour as f64);
-    let seven_under = usage
-        .seven_day
-        .as_ref()
-        .map_or(true, |w| w.utilization < thresholds.seven_day as f64);
-
-    five_over && seven_under
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::UsageWindow;
+    use crate::types::{CachedAccountUsage, UsageWindow};
 
     fn make_usage(five_h: f64, seven_d: f64) -> CachedAccountUsage {
         CachedAccountUsage {
@@ -273,16 +224,4 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    #[test]
-    fn test_is_five_hour_temp_swap() {
-        let usage = make_usage(92.0, 40.0);
-        let thresholds = crate::config::Thresholds {
-            five_hour: 90,
-            seven_day: 95,
-        };
-        assert!(is_five_hour_temp_swap(&usage, &thresholds));
-
-        let usage2 = make_usage(92.0, 96.0);
-        assert!(!is_five_hour_temp_swap(&usage2, &thresholds));
-    }
 }

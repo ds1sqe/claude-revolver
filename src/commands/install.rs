@@ -3,7 +3,48 @@ use anyhow::{Context, Result};
 use crate::paths;
 use crate::util::{atomic_write, print_info, print_warn};
 
-pub fn install_hook() -> Result<()> {
+pub fn install() -> Result<()> {
+    let mut installed = Vec::new();
+
+    // Install hooks
+    match install_hooks() {
+        Ok(hooks) => installed.extend(hooks),
+        Err(e) => print_warn(&format!("hooks: {e}")),
+    }
+
+    // Install systemd timer
+    match install_systemd_units() {
+        Ok(()) => installed.push("systemd timer".to_string()),
+        Err(e) => print_warn(&format!("systemd: {e}")),
+    }
+
+    if installed.is_empty() {
+        print_info("everything already installed");
+    } else {
+        print_info(&format!("installed: {}", installed.join(", ")));
+        print_warn("restart Claude Code for hooks to take effect");
+    }
+    Ok(())
+}
+
+pub fn uninstall() -> Result<()> {
+    // Remove hooks
+    if let Err(e) = uninstall_hooks() {
+        print_warn(&format!("hooks: {e}"));
+    }
+
+    // Remove systemd
+    if let Err(e) = uninstall_systemd_units() {
+        print_warn(&format!("systemd: {e}"));
+    }
+
+    print_info("uninstalled hooks and systemd timer");
+    Ok(())
+}
+
+// ── Hooks ───────────────────────────────────────────────────────────────
+
+fn install_hooks() -> Result<Vec<String>> {
     let settings_path = paths::settings_file()?;
     if !settings_path.exists() {
         anyhow::bail!("{} not found", settings_path.display());
@@ -24,38 +65,28 @@ pub fn install_hook() -> Result<()> {
 
     let mut installed = Vec::new();
 
-    // Install Stop hook
     if upsert_hook(hooks_obj, "Stop", "claude-revolver hook stop", 10) {
-        installed.push("Stop");
+        installed.push("Stop hook".to_string());
     }
-
-    // Install SessionStart hook
     if upsert_hook(hooks_obj, "SessionStart", "claude-revolver hook session-start", 5) {
-        installed.push("SessionStart");
+        installed.push("SessionStart hook".to_string());
     }
-
-    // Install PostToolUseFailure hook
     if upsert_hook(hooks_obj, "PostToolUseFailure", "claude-revolver hook rate-limit", 5) {
-        installed.push("PostToolUseFailure");
+        installed.push("PostToolUseFailure hook".to_string());
     }
 
-    if installed.is_empty() {
-        print_info("all hooks already installed");
-        return Ok(());
+    if !installed.is_empty() {
+        let json = serde_json::to_string_pretty(&settings)?;
+        atomic_write(&settings_path, json.as_bytes(), 0o644)?;
     }
 
-    let json = serde_json::to_string_pretty(&settings)?;
-    atomic_write(&settings_path, json.as_bytes(), 0o644)?;
-
-    print_info(&format!("hooks installed ({})", installed.join(", ")));
-    print_warn("restart Claude Code for hooks to take effect");
-    Ok(())
+    Ok(installed)
 }
 
-pub fn uninstall_hook() -> Result<()> {
+fn uninstall_hooks() -> Result<()> {
     let settings_path = paths::settings_file()?;
     if !settings_path.exists() {
-        anyhow::bail!("{} not found", settings_path.display());
+        return Ok(());
     }
 
     let content = std::fs::read_to_string(&settings_path)?;
@@ -77,12 +108,46 @@ pub fn uninstall_hook() -> Result<()> {
 
     let json = serde_json::to_string_pretty(&settings)?;
     atomic_write(&settings_path, json.as_bytes(), 0o644)?;
-
-    print_info("hooks removed from settings");
     Ok(())
 }
 
-pub fn install_systemd() -> Result<()> {
+fn upsert_hook(
+    hooks: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    command: &str,
+    timeout: u64,
+) -> bool {
+    let arr = hooks
+        .entry(key)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .expect("hook value should be an array");
+
+    let already = arr.iter().any(|entry| {
+        serde_json::to_string(entry)
+            .unwrap_or_default()
+            .contains("claude-revolver")
+    });
+
+    if already {
+        return false;
+    }
+
+    arr.push(serde_json::json!({
+        "matcher": ".*",
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": timeout
+        }]
+    }));
+
+    true
+}
+
+// ── Systemd ─────────────────────────────────────────────────────────────
+
+fn install_systemd_units() -> Result<()> {
     let unit_dir = dirs::home_dir()
         .context("cannot determine home directory")?
         .join(".config/systemd/user");
@@ -109,11 +174,10 @@ pub fn install_systemd() -> Result<()> {
         anyhow::bail!("systemctl enable failed");
     }
 
-    print_info("systemd timer installed and started");
     Ok(())
 }
 
-pub fn uninstall_systemd() -> Result<()> {
+fn uninstall_systemd_units() -> Result<()> {
     let _ = std::process::Command::new("systemctl")
         .args([
             "--user",
@@ -134,43 +198,5 @@ pub fn uninstall_systemd() -> Result<()> {
         .args(["--user", "daemon-reload"])
         .status();
 
-    print_info("systemd units removed");
     Ok(())
-}
-
-/// Insert a hook entry if no claude-revolver entry exists for this hook type.
-/// Returns true if a new entry was added, false if already present.
-fn upsert_hook(
-    hooks: &mut serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    command: &str,
-    timeout: u64,
-) -> bool {
-    let arr = hooks
-        .entry(key)
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .expect("hook value should be an array");
-
-    // Check if claude-revolver entry already exists
-    let already = arr.iter().any(|entry| {
-        serde_json::to_string(entry)
-            .unwrap_or_default()
-            .contains("claude-revolver")
-    });
-
-    if already {
-        return false;
-    }
-
-    arr.push(serde_json::json!({
-        "matcher": ".*",
-        "hooks": [{
-            "type": "command",
-            "command": command,
-            "timeout": timeout
-        }]
-    }));
-
-    true
 }

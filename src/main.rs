@@ -5,14 +5,16 @@ mod config;
 mod error;
 mod history;
 mod paths;
+mod sessions;
 mod strategy;
+mod swap;
 mod types;
 mod usage;
 mod util;
 
 use clap::Parser;
 
-use cli::{Cli, Command, ConfigAction, HookKind, InstallTarget};
+use cli::{Cli, Command, ConfigAction, HookKind};
 
 fn main() {
     let cli = Cli::parse();
@@ -39,14 +41,8 @@ fn main() {
                 HookKind::SessionStart => commands::hook::session_start(),
                 HookKind::RateLimit => commands::hook::rate_limit(),
             },
-            Command::Install { target } => match target {
-                InstallTarget::Hook => commands::install::install_hook(),
-                InstallTarget::Systemd => commands::install::install_systemd(),
-            },
-            Command::Uninstall { target } => match target {
-                InstallTarget::Hook => commands::install::uninstall_hook(),
-                InstallTarget::Systemd => commands::install::uninstall_systemd(),
-            },
+            Command::Install => commands::install::install(),
+            Command::Uninstall => commands::install::uninstall(),
         },
     };
 

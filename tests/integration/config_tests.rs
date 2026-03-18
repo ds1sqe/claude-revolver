@@ -10,7 +10,7 @@ fn config_show_defaults() {
         .args(["config", "show"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"poll_interval_seconds\": 300"))
+        .stdout(predicate::str::contains("\"poll_interval_seconds\": 60"))
         .stdout(predicate::str::contains("\"five_hour\": 90"))
         .stdout(predicate::str::contains("\"seven_day\": 95"))
         .stdout(predicate::str::contains("\"drain\""));

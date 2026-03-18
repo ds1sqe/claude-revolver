@@ -128,7 +128,7 @@ fn history_logged_on_manual_switch() {
 }
 
 #[test]
-fn history_logged_on_stop_hook() {
+fn history_logged_on_wrap_precheck() {
     let env = TestEnv::new();
     env.add_account("personal");
     env.add_account("work");
@@ -139,44 +139,18 @@ fn history_logged_on_stop_hook() {
         ("work", 10.0, 30.0),
     ]));
 
-    env.cmd()
-        .args(["hook", "stop"])
-        .write_stdin(r#"{"session_id":"sess-hist","stop_hook_active":false}"#)
+    env.cmd_with_fake_claude()
+        .arg("wrap")
         .assert()
         .success();
 
     let history = env.read_swap_history();
     let entries = history.as_array().unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["trigger"], "stop-hook");
+    assert_eq!(entries[0]["trigger"], "precheck");
     assert_eq!(entries[0]["from_account"], "personal");
     assert_eq!(entries[0]["to_account"], "work");
-    assert_eq!(entries[0]["session_id"], "sess-hist");
     assert!(entries[0]["reason"].as_str().unwrap().contains("seven_day"));
-}
-
-#[test]
-fn history_temp_swap_flagged() {
-    let env = TestEnv::new();
-    env.add_account("personal");
-    env.add_account("work");
-    env.set_active("personal");
-    env.set_live_credentials("personal");
-    // 5h over, 7d under → temp swap
-    env.write_usage_cache(&helpers::fake_usage_cache(&[
-        ("personal", 92.0, 40.0),
-        ("work", 10.0, 30.0),
-    ]));
-
-    env.cmd()
-        .args(["hook", "stop"])
-        .write_stdin(r#"{"session_id":"sess-temp","stop_hook_active":false}"#)
-        .assert()
-        .success();
-
-    let history = env.read_swap_history();
-    let entries = history.as_array().unwrap();
-    assert_eq!(entries[0]["temp_swap"], true);
 }
 
 #[test]
@@ -202,22 +176,15 @@ fn history_cap_at_1000() {
         .collect();
     env.write_swap_history(&json!(entries));
 
-    // Trigger one more swap
-    env.write_usage_cache(&helpers::fake_usage_cache(&[
-        ("personal", 50.0, 96.0),
-        ("work", 10.0, 30.0),
-    ]));
-    env.cmd()
-        .args(["hook", "stop"])
-        .write_stdin(r#"{"session_id":"new","stop_hook_active":false}"#)
-        .assert()
-        .success();
+    // Trigger one more swap via manual switch
+    env.cmd().args(["switch", "work"]).assert().success();
 
     let history = env.read_swap_history();
     let entries = history.as_array().unwrap();
     // Capped at 1000
     assert_eq!(entries.len(), 1000);
     // Newest is first
-    assert_eq!(entries[0]["trigger"], "stop-hook");
-    assert_eq!(entries[0]["session_id"], "new");
+    assert_eq!(entries[0]["trigger"], "manual");
+    assert_eq!(entries[0]["from_account"], "personal");
+    assert_eq!(entries[0]["to_account"], "work");
 }

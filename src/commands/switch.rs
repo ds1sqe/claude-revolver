@@ -2,7 +2,6 @@ use anyhow::Result;
 
 use crate::account;
 use crate::error::RevolverError;
-use crate::types::SwapLogEntry;
 use crate::util::{print_info, print_warn};
 
 pub fn run(name: &str) -> Result<()> {
@@ -18,22 +17,18 @@ pub fn run(name: &str) -> Result<()> {
         return Ok(());
     }
 
-    account::swap_credentials(from, name)?;
-
-    let _ = crate::history::log_swap(SwapLogEntry {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        from_account: from.to_string(),
-        to_account: name.to_string(),
-        reason: "manual switch".to_string(),
-        trigger: "manual".to_string(),
-        session_id: None,
-        cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
-        from_usage_5h: None,
-        from_usage_7d: None,
-        to_usage_5h: None,
-        to_usage_7d: None,
-        temp_swap: false,
-    });
+    crate::swap::perform_swap(
+        from,
+        name,
+        "manual switch",
+        "manual",
+        None,
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string())
+            .as_deref(),
+        false,
+    )?;
 
     let creds = account::read_credentials(name)?;
     let sub_type = creds

@@ -4,7 +4,7 @@ Documentation=https://github.com/ds1sqe/claude-revolver
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitActiveSec=1min
 Persistent=true
 
 [Install]

@@ -11,39 +11,53 @@ claude-revolver solves this by storing named credential sets, monitoring usage v
 ## How it works
 
 ```
-claude session running
-  └─ Stop hook fires → checks usage cache → account at 96%
-      └─ selects next account (drain/balanced strategy)
-          └─ swaps credentials on disk → writes swap-info
-              └─ wrapper detects swap → claude --resume <session-id> "Go continue."
-                  └─ session continues on new account
+claude-revolver wrap
+  └─ wrapper spawns claude with CLAUDE_REVOLVER_WRAPPED=1
+      └─ poll loop (1s):
+          ├─ SessionStart hook → signals/{pid}-session-started (session_id)
+          ├─ RateLimit hook    → signals/{pid}-rate-limited    → wrapper kills child
+          ├─ Stop hook         → signals/{pid}-stopped         → wrapper evaluates usage
+          │                                                       over threshold? → kill
+          └─ child exits
+              └─ wrapper: sync_back → evaluate → perform_swap → resume
+                  └─ claude --resume <session-id> "Go continue."
 ```
 
 1. **Store** named copies of `~/.claude/.credentials.json`
-2. **Monitor** usage via OAuth API (`GET /api/oauth/usage`) on a systemd timer
-3. **Detect** when thresholds are reached (Stop hook checks cached usage)
-4. **Swap** credentials and auto-resume the session with the new account
-5. **Log** every swap event with timestamp, trigger, reason, and session context
+2. **Monitor** usage via OAuth API (`GET /api/oauth/usage`) on a 1-minute systemd timer
+3. **Detect** via wrapper poll loop: rate-limit signals trigger immediate kill, stop signals trigger threshold evaluation
+4. **Swap** credentials via single `perform_swap()` path and auto-resume the session
+5. **Log** every swap event with timestamp, trigger, reason, usage, and session context
+
+### Architecture: two owners, zero races
+
+| Owner | Writes | Role |
+|---|---|---|
+| **Wrapper** | `active`, `credentials`, `history`, `sessions` | Single brain for automated swaps |
+| **CLI** | `active`, `credentials`, `history` | Manual user commands |
+| **Hooks** | `signals/{pid}-*` only | Dumb signal emitters, gated by env var |
+| **Monitor** | `usage-cache` only | Data collector, no decisions |
+
+Hooks are PID-namespaced — multiple wrappers in different terminals never cross-talk.
 
 ## Install
 
-
-### install from git repo
+### From git repo
 ```bash
 git clone https://github.com/ds1sqe/claude-revolver
 cd claude-revolver
 cargo install --path .
 ```
 
-### install from cargo
+### From cargo
 ```bash
 cargo install claude-revolver
+```
 
-Installs to `~/.cargo/bin/`. Then set up hooks and optionally the systemd timer:
+Installs to `~/.cargo/bin/`. Then set up hooks and systemd timer:
 
 ```bash
-claude-revolver install hook
-claude-revolver install systemd   # optional: background usage polling
+claude-revolver install    # installs hooks + systemd timer (coupled)
 ```
 
 ### Dependencies
@@ -84,11 +98,11 @@ Add to `.zshrc` / `.bashrc`:
 alias claude='claude-revolver wrap --'
 ```
 
-When usage hits the threshold, the Stop hook swaps credentials and the wrapper auto-resumes. Seamless continuation across accounts.
+The wrapper spawns claude and polls for hook signals. When usage crosses a threshold or a rate limit is hit, the wrapper kills claude, swaps credentials, and auto-resumes. Seamless continuation across accounts.
 
 ### Without the wrapper
 
-Even without the wrapper, the Stop hook still swaps credentials on disk. Claude prints `Resume with: claude --resume <id>` — just run it and the new account is already active.
+Without the wrapper, hooks are no-ops (gated by `CLAUDE_REVOLVER_WRAPPED` env var). Use `claude-revolver switch` for manual account changes.
 
 ## Configuration
 
@@ -102,7 +116,7 @@ Config file: `~/.config/claude-revolver/config.json`
 
 ```json
 {
-  "poll_interval_seconds": 300,
+  "poll_interval_seconds": 60,
   "thresholds": {
     "five_hour": 90,
     "seven_day": 95
@@ -126,7 +140,7 @@ Config file: `~/.config/claude-revolver/config.json`
 | `auto_resume` | true | Auto-resume session after swap |
 | `auto_message` | `Go continue.` | Message sent on auto-resume |
 | `notify` | true | Desktop notifications via notify-send |
-| `poll_interval_seconds` | 300 | Usage API poll interval (for systemd timer) |
+| `poll_interval_seconds` | 60 | Usage API poll interval (for systemd timer) |
 
 Setting thresholds to `100` means reactive-only: swap only when actually rate-limited, not preemptively.
 
@@ -136,10 +150,6 @@ Setting thresholds to `100` means reactive-only: swap only when actually rate-li
 - **balanced** — Spread load evenly. Always picks the account with lowest 7-day utilization.
 - **manual** — No automatic swapping. Only switch with `claude-revolver switch`.
 
-### 5-hour temp-swap
-
-If the active account hits the 5-hour limit but still has 7-day budget, the system temporarily switches to another account and **returns automatically** when the 5-hour window resets. This avoids wasting 7-day capacity on a short-term bottleneck.
-
 ## Commands
 
 | Command | Description |
@@ -147,7 +157,7 @@ If the active account hits the 5-hour limit but still has 7-day budget, the syst
 | *(no args)* | TUI account picker (fzf or numbered list) |
 | `add <name>` | Save current credentials as a named account |
 | `remove <name>` | Remove an account (alias: `rm`) |
-| `list` | List accounts with usage (alias: `ls`) |
+| `list` | List accounts with usage and reset times (alias: `ls`) |
 | `switch <name>` | Switch to a named account (alias: `sw`) |
 | `status [name]` | Show account info with live usage query (alias: `st`) |
 | `sync` | Save live credentials back to the active account's store |
@@ -158,10 +168,8 @@ If the active account hits the 5-hour limit but still has 7-day budget, the syst
 | `config show` | Show current configuration |
 | `config set <key> <val>` | Set a config value (dotted paths, e.g. `thresholds.five_hour`) |
 | `monitor` | Poll usage API for all accounts (called by systemd timer) |
-| `install hook` | Install Claude Code hooks (idempotent, won't duplicate) |
-| `install systemd` | Install systemd user timer for background monitoring |
-| `uninstall hook` | Remove Claude Code hooks (preserves other hooks) |
-| `uninstall systemd` | Remove systemd units |
+| `install` | Install hooks and systemd timer (idempotent) |
+| `uninstall` | Remove hooks and systemd timer |
 
 ## Swap history
 
@@ -169,7 +177,7 @@ Every account swap is logged persistently:
 
 ```bash
 $ claude-revolver history
-  2026-03-18T06:12:33  personal (5h:50% 7d:96%) → work (5h:10% 7d:30%)  [stop-hook]
+  2026-03-18T06:12:33  personal (5h:50% 7d:96%) → work (5h:10% 7d:30%)  [threshold]
     reason: seven_day utilization 96% >= threshold 95%
     session: 143eec0f-277e-4ce1-95f1-58eb56331874
     cwd: /home/user/project
@@ -179,7 +187,7 @@ $ claude-revolver history
     cwd: /home/user
 ```
 
-Each entry records: timestamp, trigger source (`stop-hook`, `wrap-precheck`, `wrap-rate-limit`, `manual`), from/to accounts with usage at swap time, reason, session ID, working directory, and whether it was a temporary 5h swap.
+Each entry records: timestamp, trigger source (`precheck`, `threshold`, `manual`), from/to accounts with usage at swap time, reason, session ID, working directory.
 
 History is capped at 1000 entries.
 
@@ -188,11 +196,13 @@ History is capped at 1000 entries.
 ```
 ~/.local/share/claude-revolver/
 ├── active                    # Current account name
-├── usage-cache.json          # Cached usage for all accounts
-├── sessions.json             # Session ID → account mapping
-├── swap-history.json         # Persistent swap log
-├── swap-info                 # Transient: current swap event (consumed by wrapper)
-├── rate-limited              # Transient: rate-limit flag (set by hook)
+├── usage-cache.json          # Cached usage for all accounts (monitor writes)
+├── sessions.json             # Session ID → account mapping (wrapper writes)
+├── swap-history.json         # Persistent swap log (perform_swap writes)
+├── signals/                  # PID-namespaced, transient (hooks write, wrapper reads)
+│   ├── {pid}-session-started
+│   ├── {pid}-stopped
+│   └── {pid}-rate-limited
 └── <account-name>/
     └── credentials.json      # Stored OAuth credentials
 
@@ -205,11 +215,7 @@ History is capped at 1000 entries.
 - **CLI terminal only** — Claude Desktop and web have no hook mechanism
 - **Requires manual login** — each account must be logged in via `claude login` first
 - **Session restart on swap** — OAuth tokens are cached in memory; swapping requires stop + resume
-
-## Docs
-
-- [Architecture](docs/architecture.md) — system diagram, hook flow, data layout
-- [Internals](docs/internals.md) — selection algorithms, credential sync, edge cases
+- **Wrapper required for auto-swap** — hooks are no-ops without the wrapper
 
 ## License
 

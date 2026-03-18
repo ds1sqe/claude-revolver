@@ -79,49 +79,6 @@ fn monitor_no_accounts_exits_ok() {
 }
 
 #[test]
-fn monitor_prunes_old_sessions() {
-    let env = TestEnv::new();
-    env.add_account("personal");
-    env.set_active("personal");
-
-    // Pre-populate with old session
-    env.write_sessions(&json!({
-        "old-sess": {
-            "account": "personal",
-            "started_at": "2026-03-09T12:00:00Z",
-            "source": "startup",
-            "cwd": "/tmp"
-        },
-        "recent-sess": {
-            "account": "personal",
-            "started_at": "2026-03-18T01:00:00Z",
-            "source": "startup",
-            "cwd": "/tmp"
-        }
-    }));
-
-    let mut server = mockito::Server::new();
-    let _m = server
-        .mock("GET", "/api/oauth/usage")
-        .match_header("Authorization", "Bearer sk-ant-oat01-fake-personal")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(serde_json::to_string(&helpers::fake_api_response(10.0, 20.0)).unwrap())
-        .create();
-
-    env.cmd_with_mock(&server)
-        .arg("monitor")
-        .assert()
-        .success();
-
-    let sessions = env.read_sessions();
-    // Old session pruned (>7 days from now=2026-03-18)
-    assert!(sessions.get("old-sess").is_none());
-    // Recent session kept
-    assert!(sessions.get("recent-sess").is_some());
-}
-
-#[test]
 fn monitor_handles_partial_response() {
     let env = TestEnv::new();
     env.add_account("personal");

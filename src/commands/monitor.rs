@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{account, config, paths, usage, util};
+use crate::{account, config, usage, util};
 
 pub fn run() -> Result<()> {
     let accounts = account::list_accounts()?;
@@ -92,25 +92,6 @@ pub fn run() -> Result<()> {
                 eprintln!(
                     "claude-revolver-monitor: failed to poll '{name}': {e}"
                 );
-            }
-        }
-    }
-
-    // Prune old sessions
-    let sessions_path = paths::sessions_file()?;
-    if sessions_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&sessions_path) {
-            if let Ok(mut sessions) = serde_json::from_str::<crate::types::Sessions>(&content) {
-                let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
-                let before = sessions.len();
-                sessions.retain(|_, entry| {
-                    chrono::DateTime::parse_from_rfc3339(&entry.started_at)
-                        .map(|dt| dt >= cutoff)
-                        .unwrap_or(true)
-                });
-                if sessions.len() != before {
-                    let _ = util::atomic_write_json(&sessions_path, &sessions, 0o600);
-                }
             }
         }
     }
