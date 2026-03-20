@@ -102,6 +102,22 @@ Algorithm:
 
 Never auto-swap. Only switch via explicit `claude-revolver switch <name>`.
 
+### Drain rebalance (5h recovery)
+
+In drain mode, the wrapper checks on every turn end: **"should I be on a different account?"**
+
+Example: account A is the drain priority (highest 7d). A hits the 5h threshold → wrapper swaps to B. Later, A's 5h resets. On the next turn end, the wrapper reads the usage cache, sees A is healthy, and swaps back.
+
+```
+T=0:00  A: 5h=92% 7d=40%  →  over 5h threshold → swap to B
+T=1:00  B: 5h=30% 7d=10%  →  B ok, A still 5h=80% → no rebalance
+T=3:00  B: 5h=50% 7d=12%  →  B ok, A 5h=10% 7d=42% → rebalance! swap back to A
+```
+
+This is handled by `strategy::should_rebalance()`, called in the wrapper poll loop after the threshold check. It only applies to drain mode — balanced and manual never rebalance.
+
+If the priority account is still over any threshold when checked, the rebalance is skipped. No state tracking or return timers — the strategy simply re-evaluates what's optimal on every turn.
+
 ## Configuration
 
 ### Default config

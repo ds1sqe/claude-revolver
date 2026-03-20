@@ -1,5 +1,6 @@
 use crate::config::{Config, StrategyConfig};
 use crate::types::UsageCache;
+use crate::usage;
 
 /// Select the next account to swap to based on the configured strategy.
 /// Returns None if no suitable account is found.
@@ -86,6 +87,62 @@ fn select_balanced(current: &str, accounts: &[String], cache: &UsageCache) -> Op
     });
 
     candidates.first().map(|a| a.to_string())
+}
+
+/// Drain mode only: should we switch to a higher-priority account?
+/// Returns Some(target) if a higher-priority account is healthy and
+/// we're not on it. Returns None for balanced/manual.
+pub fn should_rebalance(
+    current: &str,
+    accounts: &[String],
+    cache: &UsageCache,
+    config: &Config,
+) -> Option<String> {
+    if config.strategy.strategy_type != "drain" {
+        return None;
+    }
+
+    let priority = if config.strategy.order.is_empty() {
+        // Auto-order: highest 7d that's still under threshold
+        accounts
+            .iter()
+            .filter(|a| a.as_str() != current && is_available(cache, a))
+            .filter(|a| {
+                cache
+                    .get(a.as_str())
+                    .map_or(true, |u| {
+                        let (over, _) = usage::is_over_threshold(u, &config.thresholds);
+                        !over
+                    })
+            })
+            .max_by(|a, b| {
+                get_seven_day_util(cache, a)
+                    .partial_cmp(&get_seven_day_util(cache, b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    } else {
+        // User-defined order: first healthy account in list
+        config
+            .strategy
+            .order
+            .iter()
+            .find(|a| {
+                accounts.contains(a)
+                    && is_available(cache, a)
+                    && cache.get(a.as_str()).map_or(true, |u| {
+                        let (over, _) = usage::is_over_threshold(u, &config.thresholds);
+                        !over
+                    })
+            })
+    };
+
+    let priority = priority?;
+
+    if priority.as_str() == current {
+        return None;
+    }
+
+    Some(priority.clone())
 }
 
 /// Check if an account is available (not expired, has cached usage).
@@ -224,4 +281,71 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    fn drain_config() -> Config {
+        Config {
+            strategy: StrategyConfig {
+                strategy_type: "drain".to_string(),
+                order: vec!["a".to_string(), "b".to_string()],
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn test_rebalance_returns_priority_when_healthy() {
+        let accounts = vec!["a".to_string(), "b".to_string()];
+        let mut cache = UsageCache::new();
+        cache.insert("a".to_string(), make_usage(10.0, 40.0)); // healthy
+        cache.insert("b".to_string(), make_usage(30.0, 10.0));
+        let config = drain_config();
+
+        // On b, a is priority and healthy → rebalance to a
+        let result = should_rebalance("b", &accounts, &cache, &config);
+        assert_eq!(result, Some("a".to_string()));
+    }
+
+    #[test]
+    fn test_rebalance_none_when_on_priority() {
+        let accounts = vec!["a".to_string(), "b".to_string()];
+        let mut cache = UsageCache::new();
+        cache.insert("a".to_string(), make_usage(10.0, 40.0));
+        cache.insert("b".to_string(), make_usage(30.0, 10.0));
+        let config = drain_config();
+
+        // Already on a (priority) → no rebalance
+        let result = should_rebalance("a", &accounts, &cache, &config);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rebalance_none_when_priority_over_threshold() {
+        let accounts = vec!["a".to_string(), "b".to_string()];
+        let mut cache = UsageCache::new();
+        cache.insert("a".to_string(), make_usage(92.0, 40.0)); // 5h over 90
+        cache.insert("b".to_string(), make_usage(30.0, 10.0));
+        let config = drain_config();
+
+        // a is still over 5h threshold → don't rebalance
+        let result = should_rebalance("b", &accounts, &cache, &config);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rebalance_none_for_balanced() {
+        let accounts = vec!["a".to_string(), "b".to_string()];
+        let mut cache = UsageCache::new();
+        cache.insert("a".to_string(), make_usage(10.0, 40.0));
+        cache.insert("b".to_string(), make_usage(30.0, 10.0));
+        let config = Config {
+            strategy: StrategyConfig {
+                strategy_type: "balanced".to_string(),
+                order: vec![],
+            },
+            ..Config::default()
+        };
+
+        // Balanced mode → never rebalance
+        let result = should_rebalance("b", &accounts, &cache, &config);
+        assert_eq!(result, None);
+    }
 }

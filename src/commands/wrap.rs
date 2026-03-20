@@ -107,11 +107,13 @@ pub fn run(args: &[String]) -> Result<()> {
     util::ensure_dir(&paths::signals_dir()?, 0o700)?;
 
     let mut killed_for_swap;
+    let mut rebalance_target: Option<String>;
 
     loop {
         state.clear_signals()?;
         state.session_id = None;
         killed_for_swap = false;
+        rebalance_target = None;
 
         util::print_info(&format!("launching claude (account: {})", state.active));
 
@@ -168,7 +170,20 @@ pub fn run(args: &[String]) -> Result<()> {
                         break child.wait()?;
                     }
                 }
-                // Under threshold — do nothing, claude keeps running
+
+                // 2. Should we rebalance? (drain mode only)
+                let accounts = account::list_accounts().unwrap_or_default();
+                if let Some(target) = strategy::should_rebalance(
+                    &state.active,
+                    &accounts,
+                    &cache,
+                    &state.config,
+                ) {
+                    rebalance_target = Some(target);
+                    killed_for_swap = true;
+                    let _ = child.kill();
+                    break child.wait()?;
+                }
             }
 
             std::thread::sleep(Duration::from_secs(1));
@@ -181,65 +196,82 @@ pub fn run(args: &[String]) -> Result<()> {
             // Read remaining signals
             let _ = read_signal::<RateLimitSignal>(&state.signal_path("rate-limited")?);
 
-            let cache = usage::load_cache().unwrap_or_default();
-            let accounts = account::list_accounts()?;
-
-            let reason = if let Some(current) = cache.get(&state.active) {
-                let (_, reason) =
-                    usage::is_over_threshold(current, &state.config.thresholds);
-                if reason.is_empty() {
-                    "rate limit hit".to_string()
-                } else {
-                    reason
-                }
+            let (next, reason, trigger) = if let Some(target) = rebalance_target.take() {
+                // Rebalance: we already know the target
+                (
+                    target,
+                    "rebalance to priority account".to_string(),
+                    "rebalance",
+                )
             } else {
-                "rate limit hit".to_string()
-            };
+                // Threshold/rate-limit: strategy picks next
+                let cache = usage::load_cache().unwrap_or_default();
+                let accounts = account::list_accounts()?;
 
-            if let Some(next) = strategy::select_next_account(
-                &state.active,
-                &accounts,
-                &cache,
-                &state.config,
-            ) {
-                let trigger = "threshold";
+                let reason = if let Some(current) = cache.get(&state.active) {
+                    let (_, reason) =
+                        usage::is_over_threshold(current, &state.config.thresholds);
+                    if reason.is_empty() {
+                        "rate limit hit".to_string()
+                    } else {
+                        reason
+                    }
+                } else {
+                    "rate limit hit".to_string()
+                };
 
-                util::print_warn(&format!(
-                    "swapped from '{}' to '{next}': {reason}",
-                    state.active
-                ));
-
-                swap::perform_swap(
+                match strategy::select_next_account(
                     &state.active,
-                    &next,
-                    &reason,
-                    trigger,
-                    state.session_id.as_deref(),
-                    std::env::current_dir()
-                        .ok()
-                        .map(|p| p.display().to_string())
-                        .as_deref(),
-                    false,
-                )?;
-
-                state.active = next;
-
-                if state.config.auto_resume {
-                    if let Some(ref sid) = state.session_id {
-                        util::print_info(&format!("auto-resuming session {sid}"));
-                        state.args = vec![
-                            "--resume".into(),
-                            sid.clone(),
-                            state.config.auto_message.clone(),
-                        ];
-                        continue; // re-enter loop
+                    &accounts,
+                    &cache,
+                    &state.config,
+                ) {
+                    Some(next) => (next, reason, "threshold"),
+                    None => {
+                        util::print_warn("no accounts available for swap");
+                        // Fall through to normal exit
+                        if let Some(ref sid) = state.session_id {
+                            let _ = sessions::close(sid);
+                        }
+                        state.clear_signals()?;
+                        std::process::exit(exit_status.code().unwrap_or(0));
                     }
                 }
-                // No session_id or no auto_resume → exit
-                return Ok(());
-            } else {
-                util::print_warn("no accounts available for swap");
+            };
+
+            util::print_warn(&format!(
+                "swapped from '{}' to '{next}': {reason}",
+                state.active
+            ));
+
+            swap::perform_swap(
+                &state.active,
+                &next,
+                &reason,
+                trigger,
+                state.session_id.as_deref(),
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.display().to_string())
+                    .as_deref(),
+                false,
+            )?;
+
+            state.active = next;
+
+            if state.config.auto_resume {
+                if let Some(ref sid) = state.session_id {
+                    util::print_info(&format!("auto-resuming session {sid}"));
+                    state.args = vec![
+                        "--resume".into(),
+                        sid.clone(),
+                        state.config.auto_message.clone(),
+                    ];
+                    continue; // re-enter loop
+                }
             }
+            // No session_id or no auto_resume → exit
+            return Ok(());
         }
 
         // Normal exit

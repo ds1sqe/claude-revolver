@@ -150,6 +150,10 @@ Setting thresholds to `100` means reactive-only: swap only when actually rate-li
 - **balanced** — Spread load evenly. Always picks the account with lowest 7-day utilization.
 - **manual** — No automatic swapping. Only switch with `claude-revolver switch`.
 
+### 5-hour recovery (drain mode)
+
+If the active account hits the 5-hour threshold but still has 7-day budget, the wrapper swaps to another account. On every subsequent turn end, it checks: **has the priority account recovered?** If so, it swaps back automatically. No timers or state tracking — the strategy re-evaluates what's optimal on every turn.
+
 ## Commands
 
 | Command | Description |
